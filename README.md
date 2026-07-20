@@ -1,10 +1,10 @@
 # AI Job Search Pipeline
 
-[![Tests](https://img.shields.io/badge/tests-8%20passing-168478)](#development)
+[![Tests](https://github.com/adeluna1/ai-job-search-pipeline/actions/workflows/tests.yml/badge.svg)](https://github.com/adeluna1/ai-job-search-pipeline/actions/workflows/tests.yml)
 [![Python](https://img.shields.io/badge/python-3.10%2B-15324a)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-cc8b19)](LICENSE)
 
-A private, local-first pipeline tailored to Albert Deluna's recruiting-operations resume. It uses [WebClaw](https://github.com/0xMassi/webclaw) to discover and extract public job postings, ranks each role with an evidence-based matcher, and can optionally ask WebClaw's LLM provider chain to re-rank the strongest leads.
+A local-first pipeline tailored to Albert Deluna's recruiting-operations resume. It uses [WebClaw](https://github.com/0xMassi/webclaw) to discover and extract public job postings, ranks each role with an evidence-based matcher, and can optionally ask WebClaw's LLM provider chain to re-rank the strongest leads.
 
 The default profile intentionally excludes phone numbers and email addresses. Job data, scores, and reports stay in this folder.
 
