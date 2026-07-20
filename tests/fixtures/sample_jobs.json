@@ -1,0 +1,46 @@
+{
+  "jobs": [
+    {
+      "url": "https://example.test/jobs/recruiting-operations-coordinator",
+      "title": "Recruiting Operations Coordinator",
+      "company": "Example Robotics",
+      "location": "Mountain View, CA (Hybrid)",
+      "work_mode": "hybrid",
+      "employment_type": "Full-time",
+      "posted_date": "2026-07-18",
+      "salary": "$85,000-$105,000",
+      "required_years": 3,
+      "required_skills": ["Greenhouse ATS", "interview scheduling", "candidate communication", "reporting"],
+      "responsibilities": ["Coordinate interviews", "Maintain ATS data", "Partner with recruiters and hiring managers"],
+      "description": "Coordinate high-volume technical interviews and candidate communication. Maintain accurate Greenhouse ATS data, manage job requisitions, support offer letters and onboarding, partner with recruiters and hiring managers, build reporting dashboards, and improve candidate experience across a global team. Three years of relevant experience required."
+    },
+    {
+      "url": "https://example.test/jobs/people-operations-coordinator",
+      "title": "People Operations Coordinator",
+      "company": "Example Health",
+      "location": "Remote, United States",
+      "work_mode": "remote",
+      "employment_type": "Full-time",
+      "posted_date": "2026-07-17",
+      "salary": "$72,000-$88,000",
+      "required_years": 2,
+      "required_skills": ["onboarding", "Microsoft Excel", "cross-functional collaboration"],
+      "responsibilities": ["Onboard new hires", "Maintain employee records", "Prepare reports"],
+      "description": "Own preboarding and onboarding communications, maintain employee records and data accuracy, prepare Excel reports, partner cross-functionally with managers, and improve People Operations documentation. Two years of related experience required."
+    },
+    {
+      "url": "https://example.test/jobs/senior-rust-engineer",
+      "title": "Senior Rust Software Engineer",
+      "company": "Example Infrastructure",
+      "location": "New York, NY",
+      "work_mode": "onsite",
+      "employment_type": "Full-time",
+      "posted_date": "2026-07-16",
+      "salary": "$180,000-$220,000",
+      "required_years": 7,
+      "required_skills": ["Rust", "distributed systems", "Kubernetes"],
+      "responsibilities": ["Build backend services", "Review code"],
+      "description": "Design distributed systems in Rust, operate Kubernetes infrastructure, review production code, and mentor engineers. Seven years of software engineering experience required."
+    }
+  ]
+}

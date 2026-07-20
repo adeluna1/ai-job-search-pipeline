@@ -1,0 +1,21 @@
+{
+  "country": "us",
+  "language": "en",
+  "results_per_query": 8,
+  "queries": [
+    "\"recruiting coordinator\" (\"San Jose\" OR \"Bay Area\" OR remote) job",
+    "\"recruiting operations coordinator\" (California OR remote) job",
+    "\"talent operations coordinator\" (\"Bay Area\" OR remote) job",
+    "\"candidate experience coordinator\" (California OR remote) job",
+    "\"recruiting program coordinator\" (California OR remote) job",
+    "\"people operations coordinator\" (\"Bay Area\" OR remote) job"
+  ],
+  "preferred_job_domains": [
+    "boards.greenhouse.io",
+    "job-boards.greenhouse.io",
+    "jobs.lever.co",
+    "jobs.ashbyhq.com",
+    "myworkdayjobs.com",
+    "careers.smartrecruiters.com"
+  ]
+}
