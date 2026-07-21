@@ -1,6 +1,6 @@
 # Application actions and function reference
 
-This document explains every user action, the complete application function surface, the data it reads or changes, and how the WebClaw reference was applied.
+This document explains every user action, the complete Python application function surface, the Paperclip launcher surface, the data each action reads or changes, and how the WebClaw and Paperclip references were applied.
 
 ## WebClaw documentation reviewed
 
@@ -16,13 +16,35 @@ Implementation was based on these upstream sources from `0xMassi/webclaw`:
 
 The pipeline preserves WebClaw as a separate executable. The setup script resolves GitHub's current `latest` release, downloads the Windows x86_64 archive, verifies its SHA-256 checksum, and installs it under `tools/webclaw/`.
 
+## Paperclip documentation reviewed
+
+The control-plane implementation follows Paperclip's repository and agent-organization guidance:
+
+- `README.md`: local installation, company structure, budgets, governance, and run coordination.
+- Agent guide: roles, reporting lines, adapter configuration, instruction bundles, heartbeat behavior, and paused status.
+- Server API schemas/routes from the pinned package: companies, goals, projects, agents, issues, instruction bundles, adapter diagnostics, and pause operations.
+- Codex adapter package from the pinned Paperclip release: explicit `command`, `cwd`, `env`, `extraArgs`, timeout, and approval/sandbox bypass behavior.
+
+Paperclip is installed as a pinned Node development dependency and runs with an isolated ignored data directory. Provisioning uses its localhost REST API because that preserves structured JSON reliably on Windows PowerShell.
+
+## Specialist integration documentation reviewed
+
+- `speedyapply/JobSpy` README, `jobspy.__init__.scrape_jobs`, provider models, and board implementations: simultaneous `site_name` calls; `hours_old`; result limits; normalized dataframe columns; LinkedIn description fetch; and board-specific rate/location behavior. Version `1.1.82`, reference commit `fda080a373e8226f3fd60635323f5da9af9892b1`.
+- `srbhr/Resume-Matcher` README, FastAPI routers, request/response schemas, and ATS service: `GET /api/v1/health`, resume multipart upload, batch job upload, non-persisting improve preview, and the ATS score projection. Version `1.2.0`, reference commit `dd9b5c3b7a341a62c3a86f7a84e8e30786e6153d`.
+- `browser-use/browser-use` README, Agent constructor, BrowserProfile domain controls, sensitive-data examples, form-filling examples, and application example. Version `0.13.6`, reference commit `2be09b6c5eb702a9287684b42b27e7042a1aba29`.
+- Several auto-apply repositories were reviewed only to identify common form control families. Their code was not copied. The implementation intentionally excludes guessed answers, anti-detection behavior, credential automation, and reusable blanket submission authority.
+
+The current Resume-Matcher backend requires Python 3.13 and runs as a separate user-controlled service. JobSpy and browser-use run in separate ignored environments because their pinned `markdownify` requirements conflict.
+
 ## End-to-end action map
 
 ```text
 Configured searches
       |
       v
-WebClaw search (Serper) ----> reviewable discovered_urls.txt
+JobSpy multi-board call ----> provider diagnostics + normalized jobs
+      |
+      +---- degraded coverage ----> WebClaw search fallback
       |
       v
 WebClaw scrape --format json --only-main-content
@@ -39,6 +61,22 @@ Deterministic 5-part score ----> optional bounded LLM score blend
       |
       v
 Interactive HTML shortlist + CSV export
+      |
+      v
+Agent A freshness/source triage
+      |
+      v
+Agent B independent live verification
+      |
+      +---- optional explicit resume upload ----> Resume-Matcher ATS preview
+      |
+      +----> review / skip
+      |
+      v
+Agent C private packet ----> hash-bound pending receipt
+      |
+      v
+Paperclip per-role confirmation ----> browser-use exact-domain action or handoff
 ```
 
 ## User actions
@@ -81,7 +119,49 @@ Loads three fictional fixture jobs, ranks them without WebClaw or any key, store
 
 ### `test`
 
-The PowerShell wrapper maps this action to Python `unittest`. Tests cover privacy redaction, canonical URLs, JSON-LD normalization, relevant-vs-unrelated ranking, SQLite, and both report formats.
+The PowerShell wrapper maps this action to Python `unittest`. Tests cover privacy redaction, canonical URLs, JSON-LD normalization, relevant-vs-unrelated ranking, corrected Ashby evidence, SQLite, both report formats, and the three-agent stop-at-review contract.
+
+### `agent-profile-init`
+
+Copies the blank private answer template to ignored `data/application_profile.json`. It refuses to overwrite an existing profile unless `--force` is supplied. The template starts with contact-use consent disabled.
+
+### `agent-a [JOB_ID ...] [--fresh-days N]`
+
+Reads selected or all stored jobs and scores, validates each normalized posting, classifies the source, and calculates age only from parseable ISO dates. It uses `config.scoring.strong_fit_threshold` unless `--min-score` explicitly overrides it. It writes `data/agent_a_findings.json`; an unavailable date remains unknown rather than being guessed.
+
+### `agent-a-find [--query TEXT] [--site BOARD] [--hours-old N]`
+
+Runs Agent A's replaceable discovery boundary. The JobSpy implementation sends all selected boards in one bounded call, normalizes dataframe records, stores and scores them, regenerates the report, writes `data/agent_a_discovery.json`, and reuses `agent-a` triage for the returned IDs. A board without results is recorded as degraded/unknown coverage; successful boards are retained. The validated default boards are LinkedIn, Indeed, Glassdoor, and ZipRecruiter.
+
+### `agent-b --job-id JOB_ID ... [--fresh-days N] [--live]`
+
+Independently evaluates Agent A's leads. With `--live`, it re-scrapes the public posting through WebClaw and records invalid pages, title/company discrepancies, freshness, evidence, gaps, blockers, and one recommendation: `apply`, `review`, or `skip`. `--resume-matcher` requires `--resume` and `--allow-resume-upload`; it calls a reviewed service URL and adds tailoring-preview ATS evidence. An otherwise eligible role with external ATS score below 60 becomes `review`, not `skip`. Results go to `data/agent_b_reviews.json`.
+
+### `agent-c JOB_ID --resume FILE --application-profile FILE`
+
+Requires an Agent B `apply` recommendation, an explicitly consented private profile, and the corrected resume. It writes a review-required packet under ignored `data/application_packets/` and stops. The packet includes a common ATS form catalog, manual-only topics, and `external_submission_performed: false`. It always starts with `approval: pending`; this command has no browser or submission function.
+
+### `agent-c-browser JOB_ID [--execute] [--submit]`
+
+Without `--execute`, creates a public-safe dry-run plan and a pending private approval receipt. No browser package is imported and no data is transmitted. Execution validates the exact job ID, HTTPS URL, packet SHA-256, decision, action, reviewer, timestamp, and optional expiry before importing browser-use. `--submit` requires `allowed_action: fill_and_submit`; otherwise only `fill_only` can run. The browser profile allows only the job host, candidate values are passed as domain-scoped sensitive data, and unknown or sensitive questions require a human.
+
+### `agent-demo --resume FILE`
+
+Runs all three specialist contracts on fictional fixtures without WebClaw or a network call. Agent C uses a temporary fictional profile and must finish at `awaiting_review`, never submission. It writes `reports/agent_demo.json`.
+
+### Paperclip launch and setup actions
+
+| Script | Action |
+|---|---|
+| `scripts/start-paperclip.ps1` | Starts the isolated localhost service only when its health endpoint is not already ready. |
+| `scripts/paperclip-server.ps1` | Runs Paperclip in the foreground with this repository's ignored runtime directory. |
+| `scripts/setup-paperclip.ps1` | Idempotently creates/updates the company, goal, project, three agents, instruction bundles, and backlog issues; reapplies safe Codex settings and pauses every agent. |
+| `scripts/test-paperclip.ps1` | Verifies health, the three paused agents, bypass-disabled workspace sandboxing, starter issues, run count, and optionally the authenticated Codex hello probe. |
+| `scripts/paperclip.ps1` | Passes arguments to the pinned Paperclip CLI with the isolated data directory. |
+| `scripts/_paperclip-common.ps1` | Resolves project-local binaries, sets runtime paths/telemetry preference, implements the CLI wrapper, and checks localhost health. |
+| `scripts/install-agent-integrations.ps1` | Creates independent pinned JobSpy and browser-use virtual environments and validates imports. |
+| `scripts/agent-run.ps1` / `.cmd` | Selects the JobSpy runtime for `agent-a-find` or browser-use runtime for `agent-c-browser`. |
+| `run.cmd` | Runs `run.ps1` with a process-local execution-policy bypass for locked-down Windows systems. |
 
 ## Data and side effects
 
@@ -91,9 +171,21 @@ The PowerShell wrapper maps this action to Python `unittest`. Tests cover privac
 | `config/searches.json` | Discovery queries and direct-ATS priority list | No |
 | `data/jobs.sqlite3` | Extracted public job text, scores, runs, and manual states | No |
 | `data/discovered_urls.txt` | Search results selected for possible ingestion | No |
+| `data/agent_a_findings.json` | Agent A freshness/source decisions | No |
+| `data/agent_a_discovery.json` | Requested boards, per-board counts, normalization errors, and fallback recommendation | No |
+| `data/agent_b_reviews.json` | Agent B evidence, gaps, blockers, and recommendations | No |
+| `data/application_profile.json` | Explicitly consented private application answers | Yes; ignored by Git |
+| `data/application_packets/` | Per-job private packet with contact data and resume path | Yes; ignored by Git |
+| `data/application_approvals/` | Hash-bound pending/accepted per-job receipts | Yes; ignored by Git |
+| `data/browser_plans/` | Dry-run metadata without candidate field values | No; ignored by Git |
+| `data/application_results/` | Browser-use final result requiring employer-receipt verification | May; ignored by Git |
 | `reports/job_matches.html` | Interactive local shortlist | No |
 | `reports/job_matches.csv` | Spreadsheet-ready shortlist | No |
+| `reports/agent_demo.json` | Fictional offline specialist test result | No |
+| `reports/paperclip_setup.json` | Paperclip IDs and safety state | No |
+| `reports/paperclip_validation.json` | Reproducible agent, issue, sandbox, and adapter checks | No |
 | `logs/pipeline.log` | Operational diagnostics with known key patterns redacted | No by design |
+| `.paperclip-runtime/` | Ignored Paperclip database, configuration, and logs | May contain run text; ignored by Git |
 
 The optional resume body exists only in process memory. Optional LLM scoring sends the contact-redacted resume evidence to the provider configured through WebClaw; omit `--ai` to keep matching entirely local.
 
@@ -115,7 +207,7 @@ The optional resume body exists only in process memory. Optional LLM scoring sen
 | `_client(root, args)` | Builds the WebClaw subprocess adapter from shared CLI options. |
 | `_resume_text(args)` | Reads and contact-redacts an optional DOCX resume in memory. |
 | `_export(...)` | Joins ranked records and writes HTML plus CSV. |
-| `command_doctor(args, root)` | Implements the prerequisite/configuration diagnostic action. |
+| `command_doctor(args, root)` | Reports WebClaw/configuration state, optional JobSpy/browser runtimes, and configured Resume-Matcher URL without calling that service. |
 | `command_profile(args, root)` | Implements safe resume extraction validation. |
 | `command_search(args, root)` | Implements discovery-only output. |
 | `command_ingest(args, root)` | Implements explicit URL ingestion, scoring, and export. |
@@ -124,10 +216,76 @@ The optional resume body exists only in process memory. Optional LLM scoring sen
 | `command_status(args, root)` | Implements manual application state updates. |
 | `command_run(args, root)` | Implements the full production pipeline. |
 | `command_demo(args, root)` | Implements the deterministic fixture smoke test. |
+| `_agent_database(args, root)` | Resolves the production, demo, or explicitly selected database for specialist commands. |
+| `_selected_jobs(store, job_ids)` | Returns all or selected stored jobs and rejects unknown IDs. |
+| `command_agent_profile_init(args, root)` | Creates the ignored Agent C private-answer template without silent overwrite. |
+| `command_agent_a(args, root)` | Runs recruiter triage and writes structured findings. |
+| `command_agent_a_find(args, root)` | Runs the selected discovery provider, persists/scored jobs, writes provider diagnostics, and reuses Agent A triage. |
+| `command_agent_b(args, root)` | Runs independent stored/live analysis and writes structured reviews. |
+| `command_agent_c(args, root)` | Validates the apply handoff and prepares one pending private packet. |
+| `command_agent_c_browser(args, root)` | Creates a pending approval/dry-run plan or invokes the exactly approved browser-use runner. |
+| `command_agent_demo(args, root)` | Exercises A, B, and C offline and asserts that C stops at review. |
 | `_add_resume_option(parser)` | Adds the shared DOCX flag to applicable commands. |
 | `_add_ai_options(parser, include_extract)` | Adds provider, model, AI score, and optional AI extraction flags. |
 | `build_parser()` | Defines the complete argparse command tree and help text. |
 | `main(argv)` | Loads `.env`, configures logging, dispatches, and maps expected errors to exit code 2. |
+
+### `job_pipeline.agents`
+
+| Function/class/method | Action |
+|---|---|
+| `_parse_posted_datetime(value)` | Parses ISO timestamps conservatively and returns `None` for ambiguous/relative dates. |
+| `_source_quality(url)` | Classifies direct ATS, major board, or employer/other sources. |
+| `RecruiterFinding.to_dict()` | Serializes Agent A's active/fresh/age/source decision and reasons. |
+| `RecruiterAgent.inspect(job, fresh_days, now)` | Validates a normalized job and measures stated age against the freshness window. |
+| `MatchAnalysis.to_dict()` | Serializes Agent B's score, decision, evidence, insights, blockers, and discrepancies. |
+| `MatchAnalystAgent.analyze(...)` | Optionally re-scrapes the role, independently verifies facts, and returns `apply`, `review`, or `skip`. |
+| `ApplicationDraft.to_dict()` | Serializes Agent C's non-sensitive workflow result and packet location. |
+| `load_application_profile(path)` | Loads private answers and requires explicit contact-use consent. |
+| `ApplicationAgent.prepare(...)` | Writes a truthful, review-required private packet and lists every unresolved field; never submits. |
+
+### `job_pipeline.integrations.jobspy_source`
+
+| Function/class/method | Action |
+|---|---|
+| `DiscoveryProvider.search(...)` | Protocol that keeps Agent A independent of any one discovery repository. |
+| `_clean(value)` | Normalizes scalar and pandas-style missing values without importing pandas. |
+| `_date_text(value)` | Serializes Python/pandas date-like values conservatively. |
+| `_json_safe(value)` | Converts dataframe/numpy values into JSON-safe primitives. |
+| `_salary_text(row)` | Formats JobSpy salary columns for the canonical model. |
+| `normalize_jobspy_row(row)` | Maps one JobSpy record to `Job`, preferring the direct employer URL. |
+| `JobSpySource.__init__(scraper)` | Accepts an injectable scraper for deterministic tests. |
+| `JobSpySource._load_scraper()` | Lazily imports JobSpy and explains the isolated installer when missing. |
+| `JobSpySource.search(...)` | Executes one bounded multi-board call, normalizes usable records, and records per-board diagnostics. |
+
+### `job_pipeline.integrations.resume_matcher`
+
+| Function/class/method | Action |
+|---|---|
+| `ATSAssessment.to_dict()` | Projects the stable score, sub-scores, gaps, injectable terms, and recommendations. |
+| `ResumeMatcherClient.__init__(...)` | Normalizes the API base URL and accepts an injectable transport. |
+| `ResumeMatcherClient._default_transport(...)` | Performs bounded stdlib HTTP requests and maps network/JSON failures. |
+| `ResumeMatcherClient._json(...)` | Encodes JSON request bodies and common headers. |
+| `ResumeMatcherClient.health()` | Checks the upstream process-only health endpoint. |
+| `ResumeMatcherClient.upload_resume(path)` | Builds multipart form data and returns a processed resume ID. |
+| `ResumeMatcherClient.upload_jobs(descriptions, resume_id)` | Uploads a batch and preserves returned ID order. |
+| `ResumeMatcherClient.preview(resume_id, job_id)` | Requests the non-persisting improvement preview and extracts ATS evidence. |
+
+### `job_pipeline.integrations.browser_use_runner`
+
+| Function/class/method | Action |
+|---|---|
+| `packet_sha256(path)` | Computes the exact packet digest used by the approval gate. |
+| `build_form_answer_catalog(candidate)` | Maps common controls to reviewed values and routes sensitive/unknown fields to a human. |
+| `BrowserApplicationPlan.to_dict()` | Serializes non-secret plan metadata. |
+| `BrowserUseRunner.__init__(packet_path)` | Loads the packet and requires a valid exact-host HTTPS job URL. |
+| `BrowserUseRunner.approval_template()` | Creates a pending receipt bound to job, URL, and packet digest. |
+| `BrowserUseRunner.write_approval_template(path)` | Writes only when no receipt exists, preserving reviewer decisions. |
+| `BrowserUseRunner._validate_approval(path, action)` | Enforces packet/job/URL/action/reviewer/time/expiry invariants. |
+| `BrowserUseRunner.plan(action, approval_path)` | Reports pending, invalid, or approved state without exposing answers. |
+| `BrowserUseRunner._task(action)` | Creates a no-guess, no-bypass, fill-only or explicitly submit-capable instruction. |
+| `BrowserUseRunner.tool_exclusions(action)` | Hard-removes click, keyboard-submit, and JavaScript tools from fill-only sessions. |
+| `BrowserUseRunner.execute(...)` | Lazily imports browser-use, locks the domain, scopes sensitive data, and runs within step bounds. |
 
 ### `job_pipeline.webclaw`
 
@@ -199,6 +357,9 @@ The optional resume body exists only in process memory. Optional LLM scoring sen
 | `JobStore.upsert_job(job)` | Inserts or refreshes a canonical URL and initializes application state. |
 | `JobStore.upsert_match(match)` | Stores the latest score and explanation. |
 | `JobStore.jobs()` | Rehydrates every normalized job. |
+| `JobStore._job_from_row(row)` | Rehydrates one `Job` from a SQLite row. |
+| `JobStore.job(job_id)` | Returns one stored job or `None`. |
+| `JobStore.match(job_id)` | Returns one stored `MatchResult` or `None`. |
 | `JobStore.ranked(min_score)` | Joins jobs, matches, and application state in score order. |
 | `JobStore.set_status(job_id, status, notes)` | Updates manual tracking for an existing job. |
 | `JobStore.count_jobs()` | Returns the number of unique job URLs. |
@@ -239,7 +400,17 @@ The optional resume body exists only in process memory. Optional LLM scoring sen
 - Optional LLM unavailable: deterministic result remains final and the AI reason records the failure.
 - Resume cannot be read: the command exits with code 2 and no partial resume artifact.
 - Unknown job ID on `status`: no database row is created; exit code is 2.
+- Missing Agent A date: freshness remains unknown and Agent B must review.
+- JobSpy partial board failure: successful results remain usable and missing boards are reported for fallback judgment.
+- JobSpy total failure: `DiscoveryError` exits cleanly; another provider can implement the unchanged `DiscoveryProvider` protocol.
+- Live Agent B validation fails: recommendation becomes `skip` with a blocker.
+- Resume-Matcher is not authorized: no resume upload occurs and Agent B stays deterministic.
+- Resume-Matcher is unavailable after authorization: its error is recorded or surfaced without corrupting the deterministic match.
+- Agent C profile consent is false: no packet is produced.
+- Agent C fields are missing: packet is `needs_information` and external action is forbidden.
+- Agent C approval is pending, expired, mismatched, or approved for another action: browser-use is not imported or executed.
+- Paperclip setup reruns: existing named entities are reused, safe adapter settings are reapplied, and every agent is paused.
 
 ## Scope boundaries
 
-The app researches, ranks, exports, and tracks. It intentionally does not log in to job boards, bypass access controls, submit applications, write cover letters as fact, send email, or message recruiters.
+Agents A and B research, rank, verify, export, and track only. Agent C's packet command never acts externally. Its separate browser command can fill or submit only after an accepted, role-specific receipt matches the exact packet, URL, and action. It never bypasses access controls, guesses candidate facts, treats a prior approval as reusable, sends email, messages recruiters, or marks `applied` without an employer success receipt.

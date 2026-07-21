@@ -12,12 +12,21 @@ from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import urlsplit
 
+from .agents import ApplicationAgent, MatchAnalystAgent, RecruiterAgent, load_application_profile
+from .integrations import (
+    BrowserUseError,
+    BrowserUseRunner,
+    DiscoveryError,
+    JobSpySource,
+    ResumeMatcherClient,
+    ResumeMatcherError,
+)
 from .jobs import Job, job_from_fixture, normalize_webclaw_job, validate_job
 from .matching import apply_ai_score, score_job
 from .report import export_reports
 from .resume import ResumeError, extract_docx_text, redact_contact_details, resume_context, resume_terms
 from .storage import JobStore
-from .util import canonical_url, configure_logging, load_dotenv, read_json, unique_preserving_order
+from .util import canonical_url, configure_logging, load_dotenv, read_json, unique_preserving_order, utc_now, write_json
 from .webclaw import WebClawClient, WebClawError
 
 
@@ -228,6 +237,12 @@ def command_doctor(args: argparse.Namespace, root: Path) -> int:
     print(f"SERPER_API_KEY: {'configured' if os.environ.get('SERPER_API_KEY') else 'not configured'}")
     providers = [name for name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY") if os.environ.get(name)]
     print("LLM providers: " + (", ".join(providers) if providers else "no cloud key detected; Ollama may still be available"))
+    jobspy_python = root / "tools" / "jobspy-runtime" / "Scripts" / "python.exe"
+    browser_python = root / "tools" / "browser-use-runtime" / "Scripts" / "python.exe"
+    print(f"JobSpy runtime: {'installed' if jobspy_python.exists() else 'not installed'}")
+    print(f"browser-use runtime: {'installed' if browser_python.exists() else 'not installed'}")
+    matcher_url = os.environ.get("RESUME_MATCHER_URL", "http://127.0.0.1:3000/api/v1")
+    print(f"Resume-Matcher URL: {matcher_url} (health is checked only when requested)")
     return 0
 
 
@@ -359,6 +374,361 @@ def command_demo(args: argparse.Namespace, root: Path) -> int:
     return 0
 
 
+def _agent_database(args: argparse.Namespace, root: Path) -> Path:
+    """Resolve an optional agent database override against the project root."""
+    path = getattr(args, "database", None)
+    if not path:
+        return root / "data" / "jobs.sqlite3"
+    return path if path.is_absolute() else root / path
+
+
+def _selected_jobs(store: JobStore, job_ids: list[str]) -> list[Job]:
+    """Return requested jobs in order, or every stored job when no IDs were supplied."""
+    if not job_ids:
+        return store.jobs()
+    jobs: list[Job] = []
+    missing: list[str] = []
+    for job_id in unique_preserving_order(job_ids):
+        job = store.job(job_id)
+        if job:
+            jobs.append(job)
+        else:
+            missing.append(job_id)
+    if missing:
+        raise ValueError("Unknown job ID(s): " + ", ".join(missing))
+    return jobs
+
+
+def command_agent_profile_init(args: argparse.Namespace, root: Path) -> int:
+    """Create a private application-profile template without overwriting reviewed answers."""
+    source = root / "config" / "application_profile.example.json"
+    target = args.output or (root / "data" / "application_profile.json")
+    if target.exists() and not args.force:
+        raise ValueError(f"Private application profile already exists: {target}")
+    write_json(target, read_json(source))
+    print(f"Created private application profile template: {target}")
+    print("Review every field and enable contact-data consent before Agent C runs.")
+    return 0
+
+
+def command_agent_a(args: argparse.Namespace, root: Path) -> int:
+    """Agent A: triage stored jobs for validity, freshness, source quality, and score."""
+    profile = load_profile(root)
+    threshold = (
+        args.min_score
+        if args.min_score is not None
+        else float(profile["scoring"].get("strong_fit_threshold", 72))
+    )
+    records: list[dict[str, Any]] = []
+    with JobStore(_agent_database(args, root)) as store:
+        for job in _selected_jobs(store, args.job_id):
+            match = store.match(job.id)
+            finding = RecruiterAgent().inspect(job, fresh_days=args.fresh_days)
+            score = match.final_score if match else None
+            eligible = bool(
+                finding.active
+                and finding.fresh is not False
+                and score is not None
+                and score >= threshold
+            )
+            records.append({
+                "job_id": job.id,
+                "title": job.title,
+                "company": job.company,
+                "url": job.url,
+                "score": score,
+                "eligible_for_agent_b": eligible,
+                "finding": finding.to_dict(),
+            })
+    output = args.output or (root / "data" / "agent_a_findings.json")
+    write_json(output, {
+        "schema_version": 1,
+        "agent": RecruiterAgent.name,
+        "created_at": utc_now(),
+        "fresh_days": args.fresh_days,
+        "min_score": threshold,
+        "records": records,
+    })
+    eligible_count = sum(1 for record in records if record["eligible_for_agent_b"])
+    print(f"Agent A reviewed {len(records)} jobs; {eligible_count} advanced. Findings: {output}")
+    return 0
+
+
+def command_agent_a_find(args: argparse.Namespace, root: Path) -> int:
+    """Agent A: discover multiple boards through one replaceable provider call."""
+    if args.provider != "jobspy":
+        raise DiscoveryError(f"Unknown discovery provider: {args.provider}")
+    provider = JobSpySource()
+    jobs = provider.search(
+        search_term=args.query,
+        location=args.location,
+        hours_old=args.hours_old,
+        results_wanted=args.results_wanted,
+        sites=args.site or ["linkedin", "indeed", "glassdoor", "zip_recruiter"],
+        country=args.country,
+    )
+    discovery_output = root / "data" / "agent_a_discovery.json"
+    write_json(discovery_output, {
+        "schema_version": 1,
+        "created_at": utc_now(),
+        "query": args.query,
+        "location": args.location,
+        "hours_old": args.hours_old,
+        "diagnostics": provider.last_diagnostics,
+    })
+    if not jobs:
+        errors = provider.last_diagnostics.get("normalization_errors", [])
+        detail = "; ".join(errors[:3]) if errors else "all selected boards returned zero records"
+        raise DiscoveryError(
+            f"JobSpy returned no usable jobs ({detail}). Review {discovery_output} and select a fallback."
+        )
+    profile = load_profile(root)
+    database = _agent_database(args, root)
+    with JobStore(database) as store:
+        stored = store.upsert_jobs(jobs)
+        score_jobs(store, profile, _resume_text(args))
+        report_paths = _export(store, profile, root, args.report_min_score)
+    print(
+        f"Agent A discovered {stored} normalized jobs through {provider.name}. "
+        f"Report: {report_paths[0]}"
+    )
+    if provider.last_diagnostics.get("fallback_recommended"):
+        missing = ", ".join(provider.last_diagnostics.get("sites_without_results", []))
+        print(
+            f"Provider coverage was degraded for: {missing}. "
+            f"Review {discovery_output} and use the WebClaw fallback if needed."
+        )
+    # Reuse the established recruiter triage contract for the exact discovered IDs.
+    args.job_id = [job.id for job in jobs]
+    return command_agent_a(args, root)
+
+
+def command_agent_b(args: argparse.Namespace, root: Path) -> int:
+    """Agent B: independently verify fit and issue apply, review, or skip decisions."""
+    profile = load_profile(root)
+    threshold = (
+        args.min_score
+        if args.min_score is not None
+        else float(profile["scoring"].get("strong_fit_threshold", 72))
+    )
+    client = _client(root, args) if args.live else None
+    records: list[dict[str, Any]] = []
+    with JobStore(_agent_database(args, root)) as store:
+        jobs = _selected_jobs(store, args.job_id)
+        external_assessments: dict[str, dict[str, Any]] = {}
+        external_errors: dict[str, str] = {}
+        if args.resume_matcher:
+            if not args.resume:
+                raise ValueError("--resume is required with --resume-matcher.")
+            if not args.allow_resume_upload:
+                raise ValueError(
+                    "Resume-Matcher transmits the resume to its configured service. "
+                    "Review the URL, then pass --allow-resume-upload to opt in."
+                )
+            matcher = ResumeMatcherClient(
+                args.resume_matcher_url
+                or os.environ.get("RESUME_MATCHER_URL", "http://127.0.0.1:3000/api/v1")
+            )
+            try:
+                if not matcher.health():
+                    raise ResumeMatcherError("Resume-Matcher health check was not healthy.")
+                resume_id = matcher.upload_resume(args.resume)
+                external_job_ids = matcher.upload_jobs([job.description for job in jobs], resume_id)
+                for job, external_job_id in zip(jobs, external_job_ids):
+                    try:
+                        external_assessments[job.id] = matcher.preview(
+                            resume_id, external_job_id
+                        ).to_dict()
+                    except ResumeMatcherError as exc:
+                        external_errors[job.id] = str(exc)
+            except ResumeMatcherError as exc:
+                # Resume-Matcher is optional evidence. Preserve deterministic
+                # Agent B decisions when the explicitly requested service fails.
+                external_errors = {job.id: str(exc) for job in jobs}
+
+        for job in jobs:
+            match = store.match(job.id)
+            if not match:
+                continue
+            finding = RecruiterAgent().inspect(job, fresh_days=args.fresh_days)
+            analysis = MatchAnalystAgent().analyze(
+                job,
+                match,
+                finding,
+                threshold=threshold,
+                fresh_days=args.fresh_days,
+                client=client,
+                resume_matcher=external_assessments.get(job.id),
+            )
+            records.append({
+                "job_id": job.id,
+                "title": job.title,
+                "company": job.company,
+                "url": job.url,
+                "analysis": analysis.to_dict(),
+                "resume_matcher_error": external_errors.get(job.id, ""),
+            })
+    output = args.output or (root / "data" / "agent_b_reviews.json")
+    write_json(output, {
+        "schema_version": 1,
+        "agent": MatchAnalystAgent.name,
+        "created_at": utc_now(),
+        "threshold": threshold,
+        "live_verification_requested": args.live,
+        "resume_matcher_requested": args.resume_matcher,
+        "records": records,
+    })
+    apply_count = sum(1 for record in records if record["analysis"]["recommendation"] == "apply")
+    print(f"Agent B reviewed {len(records)} jobs; {apply_count} recommended to apply. Reviews: {output}")
+    if external_errors:
+        print(
+            f"Resume-Matcher evidence was unavailable for {len(external_errors)} job(s); "
+            "deterministic Agent B reviews were preserved."
+        )
+    return 0
+
+
+def command_agent_c(args: argparse.Namespace, root: Path) -> int:
+    """Agent C: prepare one truthful application packet and stop for board approval."""
+    profile = load_profile(root)
+    threshold = float(profile["scoring"].get("strong_fit_threshold", 72))
+    application_profile = load_application_profile(args.application_profile)
+    with JobStore(_agent_database(args, root)) as store:
+        job = store.job(args.job_id)
+        match = store.match(args.job_id)
+        if not job or not match:
+            raise ValueError(f"Job and score are required before Agent C can run: {args.job_id}")
+        finding = RecruiterAgent().inspect(job, fresh_days=args.fresh_days)
+        analysis = MatchAnalystAgent().analyze(
+            job,
+            match,
+            finding,
+            threshold=threshold,
+            fresh_days=args.fresh_days,
+        )
+        if analysis.recommendation != "apply" and not args.allow_review:
+            raise ValueError(
+                f"Agent B recommendation is '{analysis.recommendation}', so Agent C stopped before drafting."
+            )
+        draft = ApplicationAgent().prepare(
+            job,
+            analysis,
+            application_profile,
+            args.resume,
+            root / "data" / "application_packets",
+        )
+        store.set_status(job.id, "saved", "Agent C prepared a packet; Paperclip board approval is required.")
+    print(f"Agent C packet status: {draft.status}. Packet: {draft.packet_path}")
+    if draft.unresolved_questions:
+        print("Missing reviewed answers: " + ", ".join(draft.unresolved_questions))
+    else:
+        print("Packet is ready for the Paperclip approval gate; no application was submitted.")
+    return 0
+
+
+def command_agent_c_browser(args: argparse.Namespace, root: Path) -> int:
+    """Agent C: create a dry-run plan or execute an exactly approved browser task."""
+    packet = args.packet or (root / "data" / "application_packets" / f"{args.job_id}.json")
+    approval = args.approval_file or (
+        root / "data" / "application_approvals" / f"{args.job_id}.json"
+    )
+    runner = BrowserUseRunner(packet)
+    if runner.job_id != args.job_id:
+        raise BrowserUseError("The requested job ID does not match the application packet.")
+    runner.write_approval_template(approval)
+    requested_action = "fill_and_submit" if args.submit else "fill_only"
+    plan = runner.plan(requested_action, approval)
+    plan_output = root / "data" / "browser_plans" / f"{args.job_id}.json"
+    write_json(plan_output, plan.to_dict())
+    if not args.execute:
+        print(f"Agent C browser dry run created: {plan_output}")
+        print(f"Approval receipt to review: {approval}")
+        print("No browser opened and no application data was transmitted or submitted.")
+        return 0
+    result = runner.execute(
+        approval,
+        requested_action,
+        model=args.model,
+        max_steps=args.max_steps,
+    )
+    result_path = root / "data" / "application_results" / f"{args.job_id}.json"
+    write_json(result_path, result)
+    print(f"Agent C browser run completed. Verify the site confirmation: {result_path}")
+    return 0
+
+
+def command_agent_demo(args: argparse.Namespace, root: Path) -> int:
+    """Exercise all three specialist contracts offline without external submissions."""
+    profile = load_profile(root)
+    fixture = read_json(root / "tests" / "fixtures" / "sample_jobs.json")
+    database = root / "data" / "agent_demo.sqlite3"
+    reviews: list[dict[str, Any]] = []
+    application_profile = {
+        "contact": {
+            "first_name": "Demo",
+            "last_name": "Candidate",
+            "email": "demo@example.test",
+            "phone": "555-0100",
+            "city": "San Jose",
+            "state": "CA",
+            "country": "United States",
+        },
+        "links": {},
+        "eligibility": {"authorized_to_work_us": True, "requires_sponsorship": False},
+        "preferences": {},
+        "standard_answers": {},
+        "consents": {"use_contact_for_applications": True},
+    }
+    with JobStore(database) as store:
+        store.upsert_jobs(job_from_fixture(item) for item in fixture["jobs"])
+        score_jobs(store, profile, resume_text="")
+        for job in store.jobs():
+            match = store.match(job.id)
+            if not match:
+                continue
+            finding = RecruiterAgent().inspect(job, fresh_days=30)
+            analysis = MatchAnalystAgent().analyze(
+                job,
+                match,
+                finding,
+                threshold=float(profile["scoring"]["strong_fit_threshold"]),
+                fresh_days=30,
+            )
+            reviews.append({
+                "job": {"id": job.id, "title": job.title, "company": job.company},
+                "agent_a": finding.to_dict(),
+                "agent_b": analysis.to_dict(),
+            })
+        apply_review = next(item for item in reviews if item["agent_b"]["recommendation"] == "apply")
+        job = store.job(apply_review["job"]["id"])
+        match = store.match(apply_review["job"]["id"])
+        assert job and match
+        analysis = MatchAnalystAgent().analyze(
+            job,
+            match,
+            RecruiterAgent().inspect(job, fresh_days=30),
+            threshold=float(profile["scoring"]["strong_fit_threshold"]),
+            fresh_days=30,
+        )
+        draft = ApplicationAgent().prepare(
+            job,
+            analysis,
+            application_profile,
+            args.resume or (root / "README.md"),
+            root / "data" / "demo_application_packets",
+        )
+    output = root / "reports" / "agent_demo.json"
+    write_json(output, {
+        "schema_version": 1,
+        "created_at": utc_now(),
+        "reviews": reviews,
+        "agent_c": draft.to_dict(),
+        "external_submission_performed": False,
+    })
+    print(f"Three-agent demo complete. Agent C status: {draft.status}. Results: {output}")
+    return 0
+
+
 def _add_resume_option(parser: argparse.ArgumentParser) -> None:
     """Attach the shared optional resume flag to a subcommand parser."""
     parser.add_argument("--resume", type=Path, help="DOCX resume; read and redacted in memory only")
@@ -426,6 +796,109 @@ def build_parser() -> argparse.ArgumentParser:
 
     demo = sub.add_parser("demo", help="run a no-key fixture demonstration")
     demo.set_defaults(handler=command_demo)
+
+    agent_profile = sub.add_parser("agent-profile-init", help="create the private Agent C answer template")
+    agent_profile.add_argument("--output", type=Path)
+    agent_profile.add_argument("--force", action="store_true", help="replace an existing private template")
+    agent_profile.set_defaults(handler=command_agent_profile_init)
+
+    agent_a = sub.add_parser("agent-a", help="triage stored jobs like a recruiter")
+    agent_a.add_argument("--job-id", action="append", default=[])
+    agent_a.add_argument("--fresh-days", type=int, default=7)
+    agent_a.add_argument(
+        "--min-score",
+        type=float,
+        help="override config.scoring.strong_fit_threshold",
+    )
+    agent_a.add_argument("--database", type=Path)
+    agent_a.add_argument("--output", type=Path)
+    agent_a.set_defaults(handler=command_agent_a)
+
+    agent_a_find = sub.add_parser(
+        "agent-a-find",
+        help="discover recent roles through JobSpy, score them, and run Agent A triage",
+    )
+    agent_a_find.add_argument("--provider", choices=("jobspy",), default="jobspy")
+    agent_a_find.add_argument("--query", default="Recruiting Coordinator")
+    agent_a_find.add_argument("--location", default="United States")
+    agent_a_find.add_argument("--country", default="USA")
+    agent_a_find.add_argument("--hours-old", type=int, default=168)
+    agent_a_find.add_argument("--results-wanted", type=int, default=10)
+    agent_a_find.add_argument(
+        "--site",
+        action="append",
+        choices=JobSpySource.supported_sites,
+        default=None,
+        help="repeat to choose boards; default: LinkedIn, Indeed, Glassdoor, ZipRecruiter",
+    )
+    agent_a_find.add_argument("--fresh-days", type=int, default=7)
+    agent_a_find.add_argument("--min-score", type=float)
+    agent_a_find.add_argument("--report-min-score", type=float, default=0)
+    agent_a_find.add_argument("--database", type=Path)
+    agent_a_find.add_argument("--output", type=Path)
+    _add_resume_option(agent_a_find)
+    agent_a_find.set_defaults(handler=command_agent_a_find)
+
+    agent_b = sub.add_parser("agent-b", help="independently verify fit and explain the decision")
+    agent_b.add_argument("--job-id", action="append", default=[])
+    agent_b.add_argument("--fresh-days", type=int, default=7)
+    agent_b.add_argument("--min-score", type=float)
+    agent_b.add_argument("--database", type=Path)
+    agent_b.add_argument("--output", type=Path)
+    agent_b.add_argument("--live", action="store_true", help="re-scrape each role through WebClaw")
+    agent_b.add_argument(
+        "--resume-matcher",
+        action="store_true",
+        help="add ATS-preview evidence from a configured Resume-Matcher service",
+    )
+    agent_b.add_argument("--resume-matcher-url")
+    agent_b.add_argument("--resume", type=Path)
+    agent_b.add_argument(
+        "--allow-resume-upload",
+        action="store_true",
+        help="explicitly allow sending the resume to the configured Resume-Matcher URL",
+    )
+    agent_b.set_defaults(handler=command_agent_b)
+
+    agent_c = sub.add_parser("agent-c", help="prepare one approval-gated application packet")
+    agent_c.add_argument("job_id")
+    agent_c.add_argument("--resume", type=Path, required=True)
+    agent_c.add_argument(
+        "--application-profile",
+        type=Path,
+        default=project_root() / "data" / "application_profile.json",
+    )
+    agent_c.add_argument("--fresh-days", type=int, default=7)
+    agent_c.add_argument("--database", type=Path)
+    agent_c.add_argument(
+        "--allow-review",
+        action="store_true",
+        help="draft even when Agent B requires manual freshness review",
+    )
+    agent_c.set_defaults(handler=command_agent_c)
+
+    agent_c_browser = sub.add_parser(
+        "agent-c-browser",
+        help="plan or run an approval-bound browser-use application session",
+    )
+    agent_c_browser.add_argument("job_id")
+    agent_c_browser.add_argument("--packet", type=Path)
+    agent_c_browser.add_argument("--approval-file", type=Path)
+    agent_c_browser.add_argument(
+        "--execute", action="store_true", help="open browser-use after receipt validation"
+    )
+    agent_c_browser.add_argument(
+        "--submit",
+        action="store_true",
+        help="request fill_and_submit; requires a receipt approved for that exact action",
+    )
+    agent_c_browser.add_argument("--model", default=os.environ.get("BROWSER_USE_MODEL", "gpt-4.1"))
+    agent_c_browser.add_argument("--max-steps", type=int, default=40)
+    agent_c_browser.set_defaults(handler=command_agent_c_browser)
+
+    agent_demo = sub.add_parser("agent-demo", help="test Agent A, B, and C offline")
+    agent_demo.add_argument("--resume", type=Path)
+    agent_demo.set_defaults(handler=command_agent_demo)
     return parser
 
 
@@ -438,7 +911,16 @@ def main(argv: list[str] | None = None) -> int:
     configure_logging(root / "logs" / "pipeline.log", verbose=args.verbose)
     try:
         return int(args.handler(args, root))
-    except (FileNotFoundError, ResumeError, WebClawError, ValueError, json.JSONDecodeError) as exc:
+    except (
+        BrowserUseError,
+        DiscoveryError,
+        FileNotFoundError,
+        ResumeError,
+        ResumeMatcherError,
+        WebClawError,
+        ValueError,
+        json.JSONDecodeError,
+    ) as exc:
         LOGGER.error("Pipeline error: %s", exc)
         print(f"error: {exc}", file=sys.stderr)
         return 2

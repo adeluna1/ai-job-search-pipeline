@@ -1,0 +1,10 @@
+{
+  "name": "ai-job-search-pipeline-control-plane",
+  "private": true,
+  "version": "1.2.0",
+  "description": "Pinned Paperclip control plane for JobSpy discovery, optional ATS verification, and approval-gated browser agents.",
+  "devDependencies": {
+    "@openai/codex": "0.144.6",
+    "paperclipai": "2026.707.0"
+  }
+}

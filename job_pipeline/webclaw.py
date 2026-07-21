@@ -17,7 +17,7 @@ LOGGER = logging.getLogger(__name__)
 
 
 class WebClawError(RuntimeError):
-    pass
+    """Raised when the separate WebClaw executable cannot complete a request."""
 
 
 class WebClawClient:

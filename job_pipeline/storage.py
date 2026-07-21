@@ -211,33 +211,58 @@ class JobStore:
         )
         self.connection.commit()
 
+    @staticmethod
+    def _job_from_row(row: sqlite3.Row) -> Job:
+        """Reconstruct one normalized job from its SQLite row."""
+        return Job(
+            id=row["id"],
+            url=row["url"],
+            title=row["title"],
+            company=row["company"],
+            location=row["location"],
+            work_mode=row["work_mode"],
+            employment_type=row["employment_type"],
+            posted_date=row["posted_date"],
+            salary=row["salary"],
+            description=row["description"],
+            source=row["source"],
+            required_years=row["required_years"],
+            required_skills=json.loads(row["required_skills_json"]),
+            preferred_skills=json.loads(row["preferred_skills_json"]),
+            responsibilities=json.loads(row["responsibilities_json"]),
+            discovered_at=row["discovered_at"],
+            raw=json.loads(row["raw_json"]),
+        )
+
     def jobs(self) -> list[Job]:
         """Return every normalized job in the database."""
         rows = self.connection.execute("SELECT * FROM jobs ORDER BY discovered_at DESC").fetchall()
-        output: list[Job] = []
-        for row in rows:
-            output.append(
-                Job(
-                    id=row["id"],
-                    url=row["url"],
-                    title=row["title"],
-                    company=row["company"],
-                    location=row["location"],
-                    work_mode=row["work_mode"],
-                    employment_type=row["employment_type"],
-                    posted_date=row["posted_date"],
-                    salary=row["salary"],
-                    description=row["description"],
-                    source=row["source"],
-                    required_years=row["required_years"],
-                    required_skills=json.loads(row["required_skills_json"]),
-                    preferred_skills=json.loads(row["preferred_skills_json"]),
-                    responsibilities=json.loads(row["responsibilities_json"]),
-                    discovered_at=row["discovered_at"],
-                    raw=json.loads(row["raw_json"]),
-                )
-            )
-        return output
+        return [self._job_from_row(row) for row in rows]
+
+    def job(self, job_id: str) -> Job | None:
+        """Return one normalized job by stable ID, or None when it is unknown."""
+        row = self.connection.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+        return self._job_from_row(row) if row else None
+
+    def match(self, job_id: str) -> MatchResult | None:
+        """Return the latest structured match result for one job ID."""
+        row = self.connection.execute("SELECT * FROM matches WHERE job_id=?", (job_id,)).fetchone()
+        if not row:
+            return None
+        return MatchResult(
+            job_id=row["job_id"],
+            deterministic_score=row["deterministic_score"],
+            final_score=row["final_score"],
+            ai_score=row["ai_score"],
+            fit_label=row["fit_label"],
+            recommendation=row["recommendation"],
+            components=json.loads(row["components_json"]),
+            matched_skills=json.loads(row["matched_skills_json"]),
+            matched_evidence=json.loads(row["matched_evidence_json"]),
+            gaps=json.loads(row["gaps_json"]),
+            reasons=json.loads(row["reasons_json"]),
+            ai_reason=row["ai_reason"],
+        )
 
     def ranked(self, min_score: float = 0) -> list[dict[str, Any]]:
         """Return joined job, match, and application records by descending score."""

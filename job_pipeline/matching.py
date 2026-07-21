@@ -19,6 +19,7 @@ from .webclaw import WebClawClient, WebClawError
 SKILL_ALIASES: dict[str, list[str]] = {
     "applicant tracking systems": ["applicant tracking system", "ats"],
     "Greenhouse ATS": ["greenhouse", "greenhouse ats"],
+    "Ashby ATS": ["ashby", "ashby ats"],
     "G Suite": ["g suite", "google workspace", "google docs", "google calendar"],
     "AI and LLM tools": ["ai tools", "artificial intelligence", "llm", "large language model", "chatgpt", "claude", "gemini"],
     "interview scheduling": ["interview scheduling", "schedule interviews", "interview coordination", "coordinate interviews"],

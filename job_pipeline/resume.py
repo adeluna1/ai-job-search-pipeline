@@ -14,7 +14,7 @@ WORD_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 
 
 class ResumeError(RuntimeError):
-    pass
+    """Raised when the corrected DOCX resume cannot be read safely."""
 
 
 def extract_docx_text(path: Path) -> str:
@@ -72,6 +72,7 @@ def resume_terms(text: str) -> list[str]:
     """Extract conservative, job-relevant terms; never return contact data."""
     catalog = [
         "Greenhouse ATS",
+        "Ashby ATS",
         "G Suite",
         "Microsoft Excel",
         "ChatGPT",
@@ -90,6 +91,13 @@ def resume_terms(text: str) -> list[str]:
         "knowledge management",
         "LLM",
     ]
+    aliases = {
+        "Ashby ATS": ("ashby ats", "ashby"),
+    }
     normalized = text.casefold()
-    found = [term for term in catalog if term.casefold() in normalized]
+    found = [
+        term
+        for term in catalog
+        if any(alias in normalized for alias in aliases.get(term, (term.casefold(),)))
+    ]
     return unique_preserving_order(found)

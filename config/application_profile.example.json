@@ -1,0 +1,31 @@
+{
+  "contact": {
+    "first_name": "",
+    "last_name": "",
+    "email": "",
+    "phone": "",
+    "city": "",
+    "state": "",
+    "country": "United States"
+  },
+  "links": {
+    "linkedin": "",
+    "portfolio": ""
+  },
+  "eligibility": {
+    "authorized_to_work_us": null,
+    "requires_sponsorship": null
+  },
+  "preferences": {
+    "desired_salary": "",
+    "start_date": "",
+    "work_mode": ""
+  },
+  "standard_answers": {
+    "why_interested": "",
+    "additional_information": ""
+  },
+  "consents": {
+    "use_contact_for_applications": false
+  }
+}

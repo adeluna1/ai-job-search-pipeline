@@ -1,0 +1,8 @@
+allowBuilds:
+  '@embedded-postgres/windows-x64': true
+  cpu-features: false
+  esbuild: true
+  ssh2: false
+onlyBuiltDependencies:
+  - '@embedded-postgres/windows-x64'
+  - esbuild

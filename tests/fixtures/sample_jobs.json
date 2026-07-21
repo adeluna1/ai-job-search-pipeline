@@ -12,7 +12,7 @@
       "required_years": 3,
       "required_skills": ["Greenhouse ATS", "interview scheduling", "candidate communication", "reporting"],
       "responsibilities": ["Coordinate interviews", "Maintain ATS data", "Partner with recruiters and hiring managers"],
-      "description": "Coordinate high-volume technical interviews and candidate communication. Maintain accurate Greenhouse ATS data, manage job requisitions, support offer letters and onboarding, partner with recruiters and hiring managers, build reporting dashboards, and improve candidate experience across a global team. Three years of relevant experience required."
+      "description": "Responsibilities: Coordinate high-volume technical interviews and candidate communication. Maintain accurate Greenhouse ATS data, manage job requisitions, support offer letters and onboarding, partner with recruiters and hiring managers, build reporting dashboards, and improve candidate experience across a global team. Qualifications: Three years of relevant experience required."
     },
     {
       "url": "https://example.test/jobs/people-operations-coordinator",
@@ -26,7 +26,7 @@
       "required_years": 2,
       "required_skills": ["onboarding", "Microsoft Excel", "cross-functional collaboration"],
       "responsibilities": ["Onboard new hires", "Maintain employee records", "Prepare reports"],
-      "description": "Own preboarding and onboarding communications, maintain employee records and data accuracy, prepare Excel reports, partner cross-functionally with managers, and improve People Operations documentation. Two years of related experience required."
+      "description": "Responsibilities: Own preboarding and onboarding communications, maintain employee records and data accuracy, prepare Excel reports, partner cross-functionally with managers, and improve People Operations documentation. Qualifications: Two years of related experience required."
     },
     {
       "url": "https://example.test/jobs/senior-rust-engineer",
@@ -40,7 +40,7 @@
       "required_years": 7,
       "required_skills": ["Rust", "distributed systems", "Kubernetes"],
       "responsibilities": ["Build backend services", "Review code"],
-      "description": "Design distributed systems in Rust, operate Kubernetes infrastructure, review production code, and mentor engineers. Seven years of software engineering experience required."
+      "description": "Responsibilities: Design distributed systems in Rust, operate Kubernetes infrastructure, review production code, and mentor engineers. Qualifications: Seven years of software engineering experience required."
     }
   ]
 }
