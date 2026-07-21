@@ -175,6 +175,7 @@ Runs all three specialist contracts on fictional fixtures without WebClaw or a n
 | `data/agent_a_discovery.json` | Requested boards, per-board counts, normalization errors, and fallback recommendation | No |
 | `data/agent_b_reviews.json` | Agent B evidence, gaps, blockers, and recommendations | No |
 | `data/application_profile.json` | Explicitly consented private application answers | Yes; ignored by Git |
+| `data/applied_jobs.json` | Applied company/title identities, job IDs, and canonical URLs used by Agent A exclusions | Yes; ignored by Git |
 | `data/application_packets/` | Per-job private packet with contact data and resume path | Yes; ignored by Git |
 | `data/application_approvals/` | Hash-bound pending/accepted per-job receipts | Yes; ignored by Git |
 | `data/browser_plans/` | Dry-run metadata without candidate field values | No; ignored by Git |
@@ -220,7 +221,7 @@ The optional resume body exists only in process memory. Optional LLM scoring sen
 | `_selected_jobs(store, job_ids)` | Returns all or selected stored jobs and rejects unknown IDs. |
 | `command_agent_profile_init(args, root)` | Creates the ignored Agent C private-answer template without silent overwrite. |
 | `command_agent_a(args, root)` | Runs recruiter triage and writes structured findings. |
-| `command_agent_a_find(args, root)` | Runs the selected discovery provider, persists/scored jobs, writes provider diagnostics, and reuses Agent A triage. |
+| `command_agent_a_find(args, root)` | Runs the selected discovery provider, filters `data/applied_jobs.json` by job ID, canonical URL, and normalized company/title identity, then persists/scores new jobs and reuses Agent A triage. |
 | `command_agent_b(args, root)` | Runs independent stored/live analysis and writes structured reviews. |
 | `command_agent_c(args, root)` | Validates the apply handoff and prepares one pending private packet. |
 | `command_agent_c_browser(args, root)` | Creates a pending approval/dry-run plan or invokes the exactly approved browser-use runner. |
@@ -243,6 +244,16 @@ The optional resume body exists only in process memory. Optional LLM scoring sen
 | `ApplicationDraft.to_dict()` | Serializes Agent C's non-sensitive workflow result and packet location. |
 | `load_application_profile(path)` | Loads private answers and requires explicit contact-use consent. |
 | `ApplicationAgent.prepare(...)` | Writes a truthful, review-required private packet and lists every unresolved field; never submits. |
+
+### `job_pipeline.application_history`
+
+| Function | Action |
+|---|---|
+| `_company_identity(value)` | Normalizes a company name and removes harmless legal-entity suffix differences. |
+| `job_identity(job)` | Creates the stable company/title identity used across board-specific URL aliases. |
+| `load_applied_registry(path)` | Loads the ignored local registry or returns an empty schema when it does not exist. |
+| `partition_previously_applied(jobs, registry_path)` | Separates fresh discoveries from roles already applied to. |
+| `record_applied_jobs(path, jobs)` | Merges applied identities, job IDs, URLs, and timestamps into the local registry. |
 
 ### `job_pipeline.integrations.jobspy_source`
 

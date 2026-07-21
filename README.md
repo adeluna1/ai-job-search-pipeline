@@ -174,6 +174,7 @@ The included profile emphasizes:
 ## Outputs
 
 - `data/jobs.sqlite3`: job, score, run, and application-status history.
+- `data/applied_jobs.json`: ignored local registry used to suppress applied roles across fresh databases and board URL aliases.
 - `data/agent_a_findings.json`: Agent A's freshness and source triage.
 - `data/agent_a_discovery.json`: JobSpy board counts, missing-board coverage, and fallback recommendation.
 - `data/agent_b_reviews.json`: Agent B's independent decisions and evidence.

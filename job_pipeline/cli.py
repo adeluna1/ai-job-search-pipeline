@@ -13,6 +13,7 @@ from typing import Any, Iterable
 from urllib.parse import urlsplit
 
 from .agents import ApplicationAgent, MatchAnalystAgent, RecruiterAgent, load_application_profile
+from .application_history import partition_previously_applied
 from .integrations import (
     BrowserUseError,
     BrowserUseRunner,
@@ -459,7 +460,7 @@ def command_agent_a_find(args: argparse.Namespace, root: Path) -> int:
     if args.provider != "jobspy":
         raise DiscoveryError(f"Unknown discovery provider: {args.provider}")
     provider = JobSpySource()
-    jobs = provider.search(
+    discovered_jobs = provider.search(
         search_term=args.query,
         location=args.location,
         hours_old=args.hours_old,
@@ -467,6 +468,19 @@ def command_agent_a_find(args: argparse.Namespace, root: Path) -> int:
         sites=args.site or ["linkedin", "indeed", "glassdoor", "zip_recruiter"],
         country=args.country,
     )
+    jobs, previously_applied = partition_previously_applied(
+        discovered_jobs, root / "data" / "applied_jobs.json"
+    )
+    provider.last_diagnostics["previously_applied_count"] = len(previously_applied)
+    provider.last_diagnostics["previously_applied"] = [
+        {
+            "job_id": job.id,
+            "title": job.title,
+            "company": job.company,
+            "url": job.url,
+        }
+        for job in previously_applied
+    ]
     discovery_output = root / "data" / "agent_a_discovery.json"
     write_json(discovery_output, {
         "schema_version": 1,
@@ -476,12 +490,27 @@ def command_agent_a_find(args: argparse.Namespace, root: Path) -> int:
         "hours_old": args.hours_old,
         "diagnostics": provider.last_diagnostics,
     })
-    if not jobs:
+    if not discovered_jobs:
         errors = provider.last_diagnostics.get("normalization_errors", [])
         detail = "; ".join(errors[:3]) if errors else "all selected boards returned zero records"
         raise DiscoveryError(
             f"JobSpy returned no usable jobs ({detail}). Review {discovery_output} and select a fallback."
         )
+    if not jobs:
+        output = args.output or (root / "data" / "agent_a_findings.json")
+        write_json(output, {
+            "schema_version": 1,
+            "agent": RecruiterAgent.name,
+            "created_at": utc_now(),
+            "fresh_days": args.fresh_days,
+            "min_score": load_profile(root)["scoring"].get("strong_fit_threshold", 72),
+            "records": [],
+        })
+        print(
+            f"Agent A discovered {len(discovered_jobs)} normalized jobs through {provider.name}; "
+            f"all {len(previously_applied)} were already applied. Findings: {output}"
+        )
+        return 0
     profile = load_profile(root)
     database = _agent_database(args, root)
     with JobStore(database) as store:
@@ -492,6 +521,8 @@ def command_agent_a_find(args: argparse.Namespace, root: Path) -> int:
         f"Agent A discovered {stored} normalized jobs through {provider.name}. "
         f"Report: {report_paths[0]}"
     )
+    if previously_applied:
+        print(f"Agent A omitted {len(previously_applied)} previously applied role(s).")
     if provider.last_diagnostics.get("fallback_recommended"):
         missing = ", ".join(provider.last_diagnostics.get("sites_without_results", []))
         print(

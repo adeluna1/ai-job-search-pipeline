@@ -11,6 +11,10 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from job_pipeline.agents import ApplicationAgent, MatchAnalystAgent, RecruiterAgent
+from job_pipeline.application_history import (
+    partition_previously_applied,
+    record_applied_jobs,
+)
 from job_pipeline.cli import command_agent_b
 from job_pipeline.integrations.browser_use_runner import (
     BrowserUseError,
@@ -131,6 +135,36 @@ class PipelineTests(unittest.TestCase):
             self.assertTrue(html_path.exists())
             self.assertTrue(csv_path.exists())
             self.assertIn("Recruiting Operations Coordinator", html_path.read_text(encoding="utf-8"))
+
+    def test_applied_registry_excludes_board_aliases(self) -> None:
+        """Keep an applied employer role out when another board uses a different URL."""
+        direct = job_from_fixture({
+            "url": "https://jobs.example.test/recruiting-coordinator",
+            "title": "Recruiting Coordinator",
+            "company": "Example Company, Inc.",
+            "location": "Remote",
+            "description": "Responsibilities and qualifications " * 20,
+        })
+        linkedin = job_from_fixture({
+            "url": "https://www.linkedin.com/jobs/view/12345",
+            "title": "Recruiting Coordinator",
+            "company": "Example Company",
+            "location": "Remote",
+            "description": "Responsibilities and qualifications " * 20,
+        })
+        other = job_from_fixture({
+            "url": "https://jobs.other.test/talent-coordinator",
+            "title": "Talent Coordinator",
+            "company": "Other Employer",
+            "location": "San Francisco, CA",
+            "description": "Responsibilities and qualifications " * 20,
+        })
+        with tempfile.TemporaryDirectory() as temp:
+            registry = Path(temp) / "applied_jobs.json"
+            record_applied_jobs(registry, [direct])
+            new_jobs, applied_jobs = partition_previously_applied([linkedin, other], registry)
+        self.assertEqual([job.id for job in applied_jobs], [linkedin.id])
+        self.assertEqual([job.id for job in new_jobs], [other.id])
 
     def test_three_specialist_contracts_stop_at_review(self) -> None:
         """Exercise A/B/C offline and ensure Agent C cannot claim external submission."""
