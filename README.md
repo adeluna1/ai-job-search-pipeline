@@ -114,6 +114,11 @@ Agents are paused by default. Review the board and private application profile b
 # Regenerate the report with a stricter cutoff
 .\run.ps1 report --min-score 75
 
+# Build the dated, resume-weighted search snapshots (outputs stay Git-ignored)
+$env:JOB_PIPELINE_RESUME = "C:\path\to\resume.docx"
+python .\scripts\build_weighted_24h_report.py
+python .\scripts\build_weighted_7d_report.py
+
 # Track an application state
 .\run.ps1 status JOB_ID applied --notes "Applied through company site"
 
@@ -175,6 +180,7 @@ The included profile emphasizes:
 
 - `data/jobs.sqlite3`: job, score, run, and application-status history.
 - `data/applied_jobs.json`: ignored local registry used to suppress applied roles across fresh databases and board URL aliases.
+- `data/application_exclusions.local.json`: optional ignored list such as `{ "companies": ["Example Corp"] }` used by dated report builders.
 - `data/agent_a_findings.json`: Agent A's freshness and source triage.
 - `data/agent_a_discovery.json`: JobSpy board counts, missing-board coverage, and fallback recommendation.
 - `data/agent_b_reviews.json`: Agent B's independent decisions and evidence.
