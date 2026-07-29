@@ -5,11 +5,19 @@ third-party package or locally running service.
 """
 
 from .browser_use_runner import BrowserUseError, BrowserUseRunner
+from .agent_web_browser import (
+    AgentWebBrowserClient,
+    AgentWebBrowserError,
+    AgentWebBrowserPage,
+)
 from .jobspy_source import DiscoveryError, JobSpySource
 from .resume_matcher import ATSAssessment, ResumeMatcherClient, ResumeMatcherError
 
 __all__ = [
     "ATSAssessment",
+    "AgentWebBrowserClient",
+    "AgentWebBrowserError",
+    "AgentWebBrowserPage",
     "BrowserUseError",
     "BrowserUseRunner",
     "DiscoveryError",

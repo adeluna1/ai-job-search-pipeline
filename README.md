@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/python-3.10%2B-15324a)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-cc8b19)](LICENSE)
 
-A local-first pipeline tailored to Albert Deluna's recruiting-operations resume. [Paperclip](https://github.com/paperclipai/paperclip) coordinates three specialized agents: [JobSpy](https://github.com/speedyapply/JobSpy) supplies multi-board discovery, [WebClaw](https://github.com/0xMassi/webclaw) supplies direct-page extraction and fallback discovery, [Resume-Matcher](https://github.com/srbhr/Resume-Matcher) can add ATS evidence, and [browser-use](https://github.com/browser-use/browser-use) powers an approval-gated application helper.
+A local-first pipeline tailored to Albert Deluna's recruiting-operations resume. [Paperclip](https://github.com/paperclipai/paperclip) coordinates three specialized agents: [JobSpy](https://github.com/speedyapply/JobSpy) supplies multi-board discovery, [WebClaw](https://github.com/0xMassi/webclaw) supplies direct-page extraction and fallback discovery, [Agent Web Browser](https://github.com/BarnsL/agent-web-browser) supplies optional session-aware Glassdoor/ZipRecruiter reads, [Resume-Matcher](https://github.com/srbhr/Resume-Matcher) can add ATS evidence, and [browser-use](https://github.com/browser-use/browser-use) powers an approval-gated application helper.
 
 The default profile intentionally excludes phone numbers and email addresses. Job data, scores, and reports stay in this folder.
 
@@ -14,13 +14,14 @@ Job searches often scatter discovery, resume comparison, notes, and application 
 
 ## What it does
 
-1. Searches LinkedIn, Indeed, Glassdoor, and ZipRecruiter concurrently through JobSpy, with provider-level diagnostics and a replaceable discovery boundary.
-2. Uses WebClaw's Serper-backed search and direct-page extraction as a fallback or verification path.
-3. Deduplicates jobs in a local SQLite database.
-4. Scores title alignment, demonstrated skills, experience, location, and responsibility overlap.
-5. Optionally adds a Resume-Matcher tailoring-preview ATS score, keyword gaps, and recommendations without replacing the original explainable score.
-6. Produces an interactive HTML report and a CSV shortlist with match evidence and gaps.
-7. Coordinates a recruiter agent, an independent verifier, and a browser-use application assistant in Paperclip; every browser action is bound to the exact packet hash, job URL, and approved action.
+1. Searches LinkedIn and Indeed through JobSpy and attempts Glassdoor and ZipRecruiter once per run. Indeed/Glassdoor receive `country_indeed` plus a full city/state location; ZipRecruiter receives only its supported location input.
+2. Opens a per-run circuit breaker when a board returns HTTP 400/403, then automatically routes missing coverage through WebClaw search.
+3. When WebClaw cannot read a discovered Glassdoor/ZipRecruiter page, optionally uses Agent Web Browser's authenticated local WebView2 session for sanitized visible text.
+4. Resolves board results to the employer's application page and uses WebClaw to reject closed, generic, or unverifiable postings.
+5. Scores title alignment, demonstrated skills, experience, location, and responsibility overlap only after the active-page verification gate passes.
+6. Optionally adds a Resume-Matcher tailoring-preview ATS score, keyword gaps, and recommendations without replacing the original explainable score.
+7. Produces an interactive HTML report and a CSV shortlist with match evidence and gaps.
+8. Coordinates a recruiter agent, an independent verifier, and a browser-use application assistant in Paperclip; every browser action is bound to the exact packet hash, job URL, and approved action.
 
 ## Quick start on Windows
 
@@ -50,6 +51,19 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-agent-inte
 # Stage 3: Agent C browser runtime (Python 3.11+)
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-agent-integrations.ps1 -BrowserUse
 ```
+
+Agent Web Browser is an optional Agent A recovery service, not Agent C's form filler. The installer clones the reviewed commit and applies a narrow patch that permits only the two documented first-party job-board hosts:
+
+```powershell
+# Clone/pin/patch source; no compiler required
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-agent-web-browser.ps1
+
+# Requires Rust stable, Microsoft C++ Build Tools, and WebView2
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-agent-web-browser.ps1 -RunTests -Build
+.\tools\upstream\agent-web-browser\src-tauri\target\release\smab.exe
+```
+
+Log in, consent, and handle CAPTCHA only in its visible window. The pipeline reads its local token from `%LOCALAPPDATA%\agent-web-browser\api-token`. Never enable AWB's arbitrary-navigation, JavaScript, extension-mutation, or write flags for this pipeline.
 
 Resume-Matcher stays a separate service. The upstream pinned Docker image can be started locally, then configured through its UI at port 3000:
 
@@ -82,8 +96,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test-paperclip.ps1
 
 Open [http://127.0.0.1:3100](http://127.0.0.1:3100). Setup is idempotent and creates one company, one goal, one project, three paused agents, and three backlog issues:
 
-- Agent A - Recruiter: runs one bounded JobSpy multi-board call, records board coverage, scores roles, and supplies evidence-backed job IDs. WebClaw remains the fallback when board coverage degrades.
-- Agent B - Verifier: independently checks the role and returns `apply`, `review`, or `skip`; an explicitly authorized Resume-Matcher service can add ATS evidence.
+- Agent A - Recruiter: runs one bounded call per board, records exact status/coverage, and automatically hands missing coverage to WebClaw.
+- Agent B - Verifier: scores only WebClaw-verified employer postings, then returns `apply`, `review`, or `skip`; an explicitly authorized Resume-Matcher service can add ATS evidence.
 - Agent C - Application Assistant: prepares a private packet, creates a pending approval receipt, and can invoke browser-use only after an exact accepted confirmation.
 
 Agents are paused by default. Review the board and private application profile before resuming one. See [`docs/PAPERCLIP_AGENTS.md`](docs/PAPERCLIP_AGENTS.md) for the operating procedure and [`paperclip/PIPELINE_GRAPH.md`](paperclip/PIPELINE_GRAPH.md) for the graph contract.
@@ -131,7 +145,7 @@ python .\scripts\build_weighted_7d_report.py
 # Run individual specialist commands against stored jobs
 .\run.ps1 agent-a --fresh-days 7
 .\scripts\agent-run.cmd agent-a-find --query "Recruiting Coordinator" `
-  --location "United States" --hours-old 168 --results-wanted 10 `
+  --location "United States" --hours-old 168 --results-wanted 10 --concurrency 4 `
   --resume "C:\path\to\resume.docx"
 .\run.ps1 agent-b --job-id JOB_ID --fresh-days 7 --live
 .\run.ps1 agent-c JOB_ID --resume "C:\path\to\resume.docx" `
@@ -152,6 +166,7 @@ Set values in `.env`; never commit the real file.
 
 - `SERPER_API_KEY`: enables WebClaw search.
 - `WEBCLAW_API_KEY`: optional fallback for protected or JavaScript-rendered pages.
+- `AGENT_WEB_BROWSER_URL`: optional read-only local bridge; fixed to `http://127.0.0.1:7896`.
 - `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`: optional AI scoring through WebClaw.
 - Ollama requires no API key; start it locally and pass `--ai --llm-provider ollama`.
 - `WEBCLAW_BIN`: optional explicit path to the `webclaw` executable.
@@ -216,6 +231,7 @@ Excluded seniority terms and explicit requirement gaps can reduce the score. Eve
 - Application packets stay private and require per-role confirmation. Never treat silence, a prior approval, or a high match score as permission to submit.
 - Agent C must stop for missing or sensitive answers and may act externally only within the exact accepted Paperclip confirmation.
 - The browser is restricted to the job URL's exact HTTPS host. It may not bypass CAPTCHA, bot detection, access controls, or site terms.
+- Agent Web Browser is used only for first-party Glassdoor/ZipRecruiter navigation and sanitized visible-text reads. The pipeline refuses it when any upstream diagnostic or write flag is enabled.
 - Fill-only sessions remove click, keyboard-submit, dropdown-selection, and JavaScript tools at runtime; those controls remain a manual handoff.
 - Voluntary demographic, disability, veteran, criminal-history, and unknown questions always return to the candidate.
 - No agent sends recruiter messages, creates accounts, accepts unrelated terms, or invents candidate information.

@@ -195,9 +195,23 @@ def validate_job(job: Job) -> tuple[bool, str]:
     if len(job.description) < 180:
         return False, "extracted job description is too short"
     generic_titles = {"jobs", "careers", "current openings", "job opportunities", "open positions"}
-    if normalize_space(job.title).casefold() in generic_titles:
+    normalized_title = normalize_space(job.title).casefold()
+    if normalized_title in generic_titles:
         return False, f"generic page title: {job.title}"
+    if any(marker in normalized_title for marker in ("job expired", "position filled", "no longer available")):
+        return False, "page title states that the role is closed"
     description = job.description.casefold()
+    closed_markers = (
+        "this job is no longer available",
+        "this position is no longer available",
+        "this job has expired",
+        "this position has been filled",
+        "job posting has expired",
+        "no longer accepting applications",
+        "the job you are looking for is no longer",
+    )
+    if any(marker in description[:2500] for marker in closed_markers):
+        return False, "page states that the role is closed or no longer accepting applications"
     markers = (
         "responsibilities",
         "qualifications",

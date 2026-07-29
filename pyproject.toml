@@ -1,6 +1,6 @@
 [project]
 name = "ai-job-search-pipeline"
-version = "1.2.0"
+version = "1.4.0"
 description = "A private, Paperclip-orchestrated job discovery, verification, matching, and approval-gated application pipeline."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -32,6 +32,7 @@ Paperclip = "https://github.com/paperclipai/paperclip"
 JobSpy = "https://github.com/speedyapply/JobSpy"
 ResumeMatcher = "https://github.com/srbhr/Resume-Matcher"
 BrowserUse = "https://github.com/browser-use/browser-use"
+AgentWebBrowser = "https://github.com/BarnsL/agent-web-browser"
 
 [build-system]
 requires = ["setuptools>=68"]

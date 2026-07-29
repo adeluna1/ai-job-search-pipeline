@@ -3,13 +3,11 @@
 1. Read `PAPERCLIP_TASK_ID`, the task description, its goal, and all recent comments.
 2. Check out the assigned issue before mutating it.
 3. Confirm `$env:JOB_PIPELINE_RESUME` exists. If it does not, block the issue and name the missing path.
-4. Run one bounded multi-board request:
+4. Run one bounded search operation with isolated board requests:
 
    `./scripts/agent-run.cmd agent-a-find --query "Recruiting Coordinator" --location "United States" --hours-old 168 --results-wanted 10 --resume "$env:JOB_PIPELINE_RESUME"`
 
-5. Read `data/agent_a_discovery.json`. Record result counts and every requested board without results. If coverage is materially degraded and the issue authorizes fallback discovery, run WebClaw:
-
-   `./run.cmd run --resume "$env:JOB_PIPELINE_RESUME" --max-jobs 30`
+5. Read `data/agent_a_discovery.json`. Record each board's attempt count/status, open circuit breakers, WebClaw fallback status, Agent Web Browser availability/use, employer-URL resolutions, verification errors, and `verified_active_count`. Do not run a second board search: `agent-a-find` already performs the authorized fallback and active-page gate.
 
 6. If discovery was separate from triage, run:
 

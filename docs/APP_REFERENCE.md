@@ -29,9 +29,10 @@ Paperclip is installed as a pinned Node development dependency and runs with an 
 
 ## Specialist integration documentation reviewed
 
-- `speedyapply/JobSpy` README, `jobspy.__init__.scrape_jobs`, provider models, and board implementations: simultaneous `site_name` calls; `hours_old`; result limits; normalized dataframe columns; LinkedIn description fetch; and board-specific rate/location behavior. Version `1.1.82`, reference commit `fda080a373e8226f3fd60635323f5da9af9892b1`.
+- `speedyapply/JobSpy` README, `jobspy.__init__.scrape_jobs`, provider models, and board implementations: `hours_old`; result limits; normalized dataframe columns; LinkedIn description fetch; and board-specific rate/location behavior. Version `1.1.82`, reference commit `fda080a373e8226f3fd60635323f5da9af9892b1`.
 - `srbhr/Resume-Matcher` README, FastAPI routers, request/response schemas, and ATS service: `GET /api/v1/health`, resume multipart upload, batch job upload, non-persisting improve preview, and the ATS score projection. Version `1.2.0`, reference commit `dd9b5c3b7a341a62c3a86f7a84e8e30786e6153d`.
 - `browser-use/browser-use` README, Agent constructor, BrowserProfile domain controls, sensitive-data examples, form-filling examples, and application example. Version `0.13.6`, reference commit `2be09b6c5eb702a9287684b42b27e7042a1aba29`.
+- `BarnsL/agent-web-browser` README, security model, authorized-use notice, automation reference, Glassdoor/ZipRecruiter playbooks, Rust REST router, platform registry, token implementation, and MCP bridge. Version `0.1.0`, reviewed commit `cf96d04c6f2e369a4574786f75957c040cb7bf9f`.
 - Several auto-apply repositories were reviewed only to identify common form control families. Their code was not copied. The implementation intentionally excludes guessed answers, anti-detection behavior, credential automation, and reusable blanket submission authority.
 
 The current Resume-Matcher backend requires Python 3.13 and runs as a separate user-controlled service. JobSpy and browser-use run in separate ignored environments because their pinned `markdownify` requirements conflict.
@@ -42,19 +43,24 @@ The current Resume-Matcher backend requires Python 3.13 and runs as a separate u
 Configured searches
       |
       v
-JobSpy multi-board call ----> provider diagnostics + normalized jobs
+JobSpy one-attempt board calls -> status + circuit-break diagnostics
       |
-      +---- degraded coverage ----> WebClaw search fallback
+      +---- empty/error/400/403 ----> WebClaw missing-coverage search
+                                      |
+                                      +---- blocked board page ----> Agent Web Browser safe visible-text read
       |
       v
-WebClaw scrape --format json --only-main-content
+Employer application URL resolution
+      |
+      v
+WebClaw active-page verification
       |
       +----> JSON-LD JobPosting facts (preferred)
       +----> metadata/content fallbacks
       +----> optional WebClaw LLM field extraction
       |
       v
-Normalized Job ----> SQLite deduplication and application state
+Verified active Job ----> SQLite deduplication and application state
       |
       v
 Deterministic 5-part score ----> optional bounded LLM score blend
@@ -131,7 +137,7 @@ Reads selected or all stored jobs and scores, validates each normalized posting,
 
 ### `agent-a-find [--query TEXT] [--site BOARD] [--hours-old N]`
 
-Runs Agent A's replaceable discovery boundary. The JobSpy implementation sends all selected boards in one bounded call, normalizes dataframe records, stores and scores them, regenerates the report, writes `data/agent_a_discovery.json`, and reuses `agent-a` triage for the returned IDs. A board without results is recorded as degraded/unknown coverage; successful boards are retained. The validated default boards are LinkedIn, Indeed, Glassdoor, and ZipRecruiter.
+Runs Agent A's optimized discovery boundary. Each selected JobSpy board is attempted once. Indeed and Glassdoor receive `country_indeed` plus normalized full city/state locations; ZipRecruiter receives its location parameter without `country_indeed`. Captured HTTP 400/403 errors open a run-scoped circuit breaker. Empty, blocked, or errored coverage is automatically routed through WebClaw search. Results are resolved to employer application URLs, scraped again, and rejected when closed, generic, mismatched, or unverifiable. Only successful verification receipts cross the Agent B scoring gate. The full board, fallback, resolution, and verification audit is written to `data/agent_a_discovery.json`.
 
 ### `agent-b --job-id JOB_ID ... [--fresh-days N] [--live]`
 
@@ -160,6 +166,7 @@ Runs all three specialist contracts on fictional fixtures without WebClaw or a n
 | `scripts/paperclip.ps1` | Passes arguments to the pinned Paperclip CLI with the isolated data directory. |
 | `scripts/_paperclip-common.ps1` | Resolves project-local binaries, sets runtime paths/telemetry preference, implements the CLI wrapper, and checks localhost health. |
 | `scripts/install-agent-integrations.ps1` | Creates independent pinned JobSpy and browser-use virtual environments and validates imports. |
+| `scripts/install-agent-web-browser.ps1` | Clones the reviewed AWB commit, applies the two-domain navigation patch idempotently, and optionally runs Rust tests/build. |
 | `scripts/agent-run.ps1` / `.cmd` | Selects the JobSpy runtime for `agent-a-find` or browser-use runtime for `agent-c-browser`. |
 | `run.cmd` | Runs `run.ps1` with a process-local execution-policy bypass for locked-down Windows systems. |
 
@@ -204,6 +211,7 @@ The optional resume body exists only in process memory. Optional LLM scoring sen
 | `_scrape_one(...)` | Worker boundary that scrapes and normalizes exactly one URL. |
 | `ingest_urls(...)` | Runs bounded parallel scrape workers and persists successes on the main thread. |
 | `score_jobs(...)` | Deterministically scores every job and optionally invokes the AI blend. |
+| `score_verified_jobs(...)` | Scores only jobs carrying a successful WebClaw active-page verification receipt. |
 | `_read_urls_file(path)` | Reads non-comment URL lines from a UTF-8 text file. |
 | `_client(root, args)` | Builds the WebClaw subprocess adapter from shared CLI options. |
 | `_resume_text(args)` | Reads and contact-redacts an optional DOCX resume in memory. |
@@ -259,15 +267,60 @@ The optional resume body exists only in process memory. Optional LLM scoring sen
 
 | Function/class/method | Action |
 |---|---|
+| `_BoardLogCapture.__init__()` | Creates a warning/error-only capture for one isolated JobSpy board call. |
+| `_BoardLogCapture.emit(record)` | Retains the provider message that JobSpy would otherwise only print. |
+| `_board_logger_name(site)` | Maps canonical board identifiers to JobSpy logger names. |
+| `_http_block_status(messages)` | Detects non-retryable HTTP 400/403 outcomes in captured provider logs. |
 | `DiscoveryProvider.search(...)` | Protocol that keeps Agent A independent of any one discovery repository. |
 | `_clean(value)` | Normalizes scalar and pandas-style missing values without importing pandas. |
 | `_date_text(value)` | Serializes Python/pandas date-like values conservatively. |
 | `_json_safe(value)` | Converts dataframe/numpy values into JSON-safe primitives. |
 | `_salary_text(row)` | Formats JobSpy salary columns for the canonical model. |
 | `normalize_jobspy_row(row)` | Maps one JobSpy record to `Job`, preferring the direct employer URL. |
+| `normalize_us_city_location(location)` | Converts supported Bay Area aliases and abbreviated city/state values to direct U.S. city names with `California` written in full. |
+| `normalize_glassdoor_location(location)` | Compatibility wrapper for the shared direct-city normalizer. |
 | `JobSpySource.__init__(scraper)` | Accepts an injectable scraper for deterministic tests. |
 | `JobSpySource._load_scraper()` | Lazily imports JobSpy and explains the isolated installer when missing. |
-| `JobSpySource.search(...)` | Executes one bounded multi-board call, normalizes usable records, and records per-board diagnostics. |
+| `JobSpySource.search(...)` | Executes bounded board-isolated calls, applies only provider-supported location parameters, normalizes usable records, and records per-board strategy, errors, and result counts. |
+
+### `job_pipeline.discovery_fallback`
+
+| Function | Action |
+|---|---|
+| `_host(url)` | Returns a case-normalized hostname for routing decisions. |
+| `_is_board_url(url)` | Identifies supported aggregator URLs. |
+| `_board_for_url(url)` | Maps an exact supported aggregator hostname to its canonical board identifier. |
+| `_is_application_candidate(url)` | Rejects board/social navigation and retains plausible employer/ATS job URLs. |
+| `_payload_links(value, parent_key)` | Reads explicit link fields from WebClaw JSON without mining untrusted body prose. |
+| `_candidate_rank(url)` | Prioritizes known direct ATS links, then employer job paths. |
+| `_identity_tokens(value)` | Produces conservative title/company tokens for identity checks. |
+| `_same_role(source, candidate)` | Requires compatible title and company identity before redirecting. |
+| `_mark_verified(job, source_url, resolution)` | Adds the timestamped WebClaw verification receipt used by the score gate. |
+| `resolve_employer_application(...)` | Scrapes a result, optionally recovers blocked Glassdoor/ZipRecruiter visible text through AWB, resolves the employer URL, and returns only a validated posting. |
+| `webclaw_fallback_discovery(...)` | Searches missing board coverage through WebClaw, optionally uses AWB page reads, and records every resolution/error. |
+| `verify_discovered_jobs(...)` | Concurrently checks discovered URLs through WebClaw/AWB and returns only active verified postings. |
+| `is_webclaw_verified(job)` | Validates the stored WebClaw verification receipt used by the scoring gate. |
+
+### `job_pipeline.integrations.agent_web_browser`
+
+| Function/class/method | Action |
+|---|---|
+| `AgentWebBrowserPage` | Holds the sanitized URL, title, platform, visible text, and source length. |
+| `AgentWebBrowserClient.__init__(...)` | Accepts only the fixed loopback bridge and refuses all upstream unsafe/write environment flags. |
+| `AgentWebBrowserClient.assert_safe_mode()` | Stops integration when arbitrary navigation, JavaScript, extension mutation, or writes are enabled. |
+| `AgentWebBrowserClient.default_token_path()` | Resolves the actual upstream `%LOCALAPPDATA%\agent-web-browser\api-token` implementation. |
+| `AgentWebBrowserClient._load_token()` | Loads and validates the local token without logging it. |
+| `AgentWebBrowserClient._default_transport(...)` | Performs bounded stdlib loopback JSON requests with redacted failures. |
+| `AgentWebBrowserClient._request(...)` | Adds bearer authentication to protected routes and maps bridge rejections. |
+| `AgentWebBrowserClient.health()` | Calls the minimal unauthenticated health endpoint. |
+| `AgentWebBrowserClient.available()` | Converts a normally stopped bridge into `False`. |
+| `AgentWebBrowserClient.status()` | Reads authenticated tab/platform status. |
+| `AgentWebBrowserClient.platforms()` | Reads supported platform metadata. |
+| `AgentWebBrowserClient.show_window()` | Shows the managed browser for human login or verification. |
+| `AgentWebBrowserClient._validate_board_url(...)` | Allows only exact first-party HTTPS Glassdoor/ZipRecruiter hosts. |
+| `AgentWebBrowserClient._result(...)` | Normalizes wrapped bridge results. |
+| `AgentWebBrowserClient.read_job_page(...)` | Serializes managed-browser access so concurrent verification workers cannot race the active tab. |
+| `AgentWebBrowserClient._read_job_page_unlocked(...)` | Reuses or opens a board tab, polls boundedly, and returns sanitized visible text without form actions while holding the session lock. |
 
 ### `job_pipeline.integrations.resume_matcher`
 
@@ -335,7 +388,7 @@ The optional resume body exists only in process memory. Optional LLM scoring sen
 | `_company_from_markdown(url, markdown)` | Recovers a direct-ATS company name from employer logo alt text or URL slug. |
 | `infer_work_mode(location, description)` | Classifies remote, hybrid, onsite, or unknown from stated text. |
 | `infer_required_years(description)` | Extracts the lowest explicit experience requirement. |
-| `validate_job(job)` | Rejects empty shells, generic career indexes, and redirected/expired role pages. |
+| `validate_job(job)` | Rejects empty shells, generic career indexes, explicit closed/expired messages, and non-role pages. |
 | `normalize_webclaw_job(url, payload, ai_fields)` | Merges fields in trust order: JSON-LD, WebClaw metadata/content, then optional AI gaps. |
 | `job_from_fixture(data)` | Builds a normalized demo/test record. |
 
@@ -414,6 +467,8 @@ The optional resume body exists only in process memory. Optional LLM scoring sen
 - Missing Agent A date: freshness remains unknown and Agent B must review.
 - JobSpy partial board failure: successful results remain usable and missing boards are reported for fallback judgment.
 - JobSpy total failure: `DiscoveryError` exits cleanly; another provider can implement the unchanged `DiscoveryProvider` protocol.
+- Agent Web Browser is not running/authenticated: diagnostics record it and the normal WebClaw path remains available.
+- Agent Web Browser unsafe/write flag is enabled: its client refuses to initialize.
 - Live Agent B validation fails: recommendation becomes `skip` with a blocker.
 - Resume-Matcher is not authorized: no resume upload occurs and Agent B stays deterministic.
 - Resume-Matcher is unavailable after authorization: its error is recorded or surfaced without corrupting the deterministic match.

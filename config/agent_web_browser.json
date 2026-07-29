@@ -1,0 +1,16 @@
+{
+  "repository": "https://github.com/BarnsL/agent-web-browser.git",
+  "commit": "cf96d04c6f2e369a4574786f75957c040cb7bf9f",
+  "base_url": "http://127.0.0.1:7896",
+  "mode": "read_only_job_board_fallback",
+  "supported_boards": [
+    "glassdoor",
+    "zip_recruiter"
+  ],
+  "unsafe_environment_flags": [
+    "SMAB_ALLOW_ARBITRARY_NAVIGATION",
+    "SMAB_UNSAFE_TOOLS_ENABLED",
+    "SMAB_EXTENSION_MUTATION_ENABLED",
+    "SMAB_ALLOW_WRITES"
+  ]
+}

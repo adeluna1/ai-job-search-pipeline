@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -15,11 +16,22 @@ from job_pipeline.application_history import (
     partition_previously_applied,
     record_applied_jobs,
 )
-from job_pipeline.cli import command_agent_b
+from job_pipeline.cli import command_agent_b, score_verified_jobs
+from job_pipeline.discovery_fallback import (
+    is_webclaw_verified,
+    resolve_employer_application,
+    verify_discovered_jobs,
+    webclaw_fallback_discovery,
+)
 from job_pipeline.integrations.browser_use_runner import (
     BrowserUseError,
     BrowserUseRunner,
     build_form_answer_catalog,
+)
+from job_pipeline.integrations.agent_web_browser import (
+    AgentWebBrowserClient,
+    AgentWebBrowserError,
+    AgentWebBrowserPage,
 )
 from job_pipeline.integrations.jobspy_source import JobSpySource
 from job_pipeline.integrations.resume_matcher import ResumeMatcherClient
@@ -31,6 +43,7 @@ from job_pipeline.resume import redact_contact_details, resume_terms
 from job_pipeline.storage import JobStore
 from job_pipeline.util import canonical_url
 from job_pipeline.util import write_json
+from job_pipeline.webclaw import WebClawError
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -238,6 +251,326 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(calls[0]["site_name"], ["indeed"])
         self.assertEqual(source.last_diagnostics["result_counts_by_site"], {"indeed": 1})
         self.assertFalse(source.last_diagnostics["fallback_recommended"])
+
+    def test_jobspy_uses_provider_safe_glassdoor_location(self) -> None:
+        """Give Glassdoor a parseable city while preserving other board scope."""
+        calls = []
+
+        class FakeFrame:
+            def __init__(self, site: str):
+                self.site = site
+
+            def to_dict(self, orient: str):
+                return [{
+                    "site": self.site,
+                    "title": "Recruiting Coordinator",
+                    "company": f"{self.site.title()} Company",
+                    "job_url": f"https://jobs.example.test/{self.site}",
+                    "location": "San Francisco, CA",
+                    "description": "Coordinate interviews and candidate communication.",
+                    "date_posted": "2026-07-23",
+                    "is_remote": False,
+                }]
+
+        def fake_scrape(**kwargs):
+            calls.append(kwargs)
+            return FakeFrame(kwargs["site_name"][0])
+
+        source = JobSpySource(scraper=fake_scrape)
+        jobs = source.search(
+            "Recruiting Coordinator",
+            "San Francisco Bay Area",
+            24,
+            5,
+            ["indeed", "glassdoor"],
+        )
+
+        self.assertEqual(len(jobs), 2)
+        self.assertEqual(calls[0]["site_name"], ["indeed"])
+        self.assertEqual(calls[0]["location"], "San Francisco, California")
+        self.assertEqual(calls[0]["country_indeed"], "USA")
+        self.assertEqual(calls[1]["site_name"], ["glassdoor"])
+        self.assertEqual(calls[1]["location"], "San Francisco, California")
+        self.assertEqual(calls[1]["country_indeed"], "USA")
+        self.assertEqual(
+            source.last_diagnostics["query_locations_by_site"]["glassdoor"],
+            "San Francisco, California",
+        )
+        self.assertEqual(
+            source.last_diagnostics["parameter_strategy_by_site"]["indeed"],
+            "country_indeed_plus_full_city_state",
+        )
+        self.assertEqual(
+            source.last_diagnostics["parameter_strategy_by_site"]["glassdoor"],
+            "country_indeed_plus_full_city_state",
+        )
+
+    def test_jobspy_ziprecruiter_uses_only_full_city_location(self) -> None:
+        """Avoid sending Indeed-only country parameters to ZipRecruiter."""
+        calls = []
+
+        class EmptyFrame:
+            def to_dict(self, orient: str):
+                return []
+
+        def fake_scrape(**kwargs):
+            calls.append(kwargs)
+            return EmptyFrame()
+
+        source = JobSpySource(scraper=fake_scrape)
+        source.search(
+            "Recruiting Coordinator",
+            "San Jose, CA",
+            24,
+            5,
+            ["zip_recruiter"],
+        )
+
+        self.assertEqual(calls[0]["site_name"], ["zip_recruiter"])
+        self.assertEqual(calls[0]["location"], "San Jose, California")
+        self.assertNotIn("country_indeed", calls[0])
+        self.assertEqual(
+            source.last_diagnostics["parameter_strategy_by_site"]["zip_recruiter"],
+            "location_only_full_city_state",
+        )
+
+    def test_jobspy_opens_run_circuit_breaker_on_http_400(self) -> None:
+        """Capture swallowed provider errors and never retry a blocked board in-run."""
+        calls = []
+
+        class EmptyFrame:
+            def to_dict(self, orient: str):
+                return []
+
+        def fake_scrape(**kwargs):
+            calls.append(kwargs)
+            logging.getLogger("JobSpy:Glassdoor").error(
+                "Glassdoor response status code 400"
+            )
+            return EmptyFrame()
+
+        source = JobSpySource(scraper=fake_scrape)
+        source.search(
+            "Recruiting Coordinator",
+            "San Francisco, California",
+            24,
+            5,
+            ["glassdoor"],
+        )
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(source.last_diagnostics["attempts_by_site"]["glassdoor"], 1)
+        self.assertEqual(
+            source.last_diagnostics["status_by_site"]["glassdoor"], "blocked_400"
+        )
+        self.assertTrue(
+            source.last_diagnostics["circuit_breakers"]["glassdoor"]["open"]
+        )
+        self.assertFalse(
+            source.last_diagnostics["circuit_breakers"]["glassdoor"][
+                "retry_in_current_run"
+            ]
+        )
+
+    def test_webclaw_fallback_resolves_and_verifies_employer_page(self) -> None:
+        """Turn an indexed board result into a validated direct ATS posting."""
+        board_url = "https://www.glassdoor.com/job-listing/recruiting-coordinator-acme"
+        employer_url = "https://job-boards.greenhouse.io/acme/jobs/123"
+        description = "About the role. Responsibilities and qualifications. " * 12
+        board_payload = {
+            "metadata": {"title": "Recruiting Coordinator | Acme"},
+            "content": {
+                "plain_text": description,
+                "links": [{"text": "Apply", "url": employer_url}],
+            },
+            "structured_data": [],
+        }
+        employer_payload = {
+            "metadata": {"title": "Recruiting Coordinator | Acme"},
+            "content": {"plain_text": description},
+            "structured_data": [{
+                "@type": "JobPosting",
+                "title": "Recruiting Coordinator",
+                "hiringOrganization": {"name": "Acme"},
+                "description": description,
+                "datePosted": "2026-07-28",
+            }],
+        }
+
+        class FakeWebClaw:
+            def search(self, query, num=8, country="us", language="en"):
+                return [{"link": board_url}]
+
+            def scrape(self, url):
+                return employer_payload if url == employer_url else board_payload
+
+        jobs, diagnostics = webclaw_fallback_discovery(
+            FakeWebClaw(),
+            "Recruiting Coordinator",
+            "San Francisco, California",
+            72,
+            ["glassdoor"],
+            5,
+        )
+
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0].url, employer_url)
+        self.assertTrue(is_webclaw_verified(jobs[0]))
+        self.assertEqual(diagnostics["resolved_active_jobs"], 1)
+        self.assertEqual(
+            diagnostics["resolution_records"][0]["resolution"],
+            "employer_application_page",
+        )
+
+    def test_live_verification_rejects_closed_posting(self) -> None:
+        """Do not allow a closed employer page into Agent B's scoreable set."""
+        job = job_from_fixture(self.fixtures[0])
+
+        class ClosedWebClaw:
+            def scrape(self, url):
+                return {
+                    "metadata": {"title": "Recruiting Coordinator | Example"},
+                    "content": {
+                        "plain_text": (
+                            "This job is no longer available. Responsibilities and "
+                            "qualifications. " * 12
+                        )
+                    },
+                    "structured_data": [],
+                }
+
+            def search(self, query, num=8, country="us", language="en"):
+                return []
+
+        verified, errors = verify_discovered_jobs(ClosedWebClaw(), [job], concurrency=1)
+        self.assertEqual(verified, [])
+        self.assertEqual(len(errors), 1)
+        self.assertIn("closed", errors[0]["error"])
+
+    def test_matching_gate_scores_only_verified_active_jobs(self) -> None:
+        """Make the verified-only Agent B scoring rule executable and regression-safe."""
+        verified = job_from_fixture(self.fixtures[0])
+        verified.raw["verification"] = {
+            "active": True,
+            "verified_by": "webclaw",
+            "verified_at": "2026-07-28T12:00:00+00:00",
+        }
+        unverified = job_from_fixture(self.fixtures[1])
+        with tempfile.TemporaryDirectory() as temp:
+            with JobStore(Path(temp) / "jobs.sqlite3") as store:
+                store.upsert_jobs([verified, unverified])
+                scored = score_verified_jobs(store, [verified, unverified], self.profile, "")
+                verified_match = store.match(verified.id)
+                unverified_match = store.match(unverified.id)
+        self.assertEqual(scored, 1)
+        self.assertIsNotNone(verified_match)
+        self.assertIsNone(unverified_match)
+
+    def test_agent_web_browser_uses_authenticated_read_only_routes(self) -> None:
+        """Navigate an exact board tab and retrieve sanitized visible text."""
+        calls = []
+        description = "About the role. Responsibilities and qualifications. " * 12
+
+        def transport(method, path, body, headers):
+            calls.append((method, path, body, headers))
+            if path == "/health":
+                return {"ok": True, "port": 7896}
+            if path == "/status":
+                return {
+                    "ok": True,
+                    "activeTab": 7,
+                    "tabs": [{
+                        "id": 7,
+                        "platform": "glassdoor",
+                        "url": "https://www.glassdoor.com/job-listing/123",
+                        "title": "Recruiting Coordinator | Acme",
+                    }],
+                }
+            if path == "/page/text":
+                return {"ok": True, "result": {"text": description, "len": len(description)}}
+            return {"ok": True}
+
+        client = AgentWebBrowserClient(
+            token="a" * 64,
+            transport=transport,
+        )
+        self.assertTrue(client.available())
+        page = client.read_job_page(
+            "https://www.glassdoor.com/job-listing/123",
+            "glassdoor",
+            poll_attempts=1,
+        )
+
+        self.assertIn("Responsibilities", page.text)
+        self.assertEqual(page.platform, "glassdoor")
+        health_call = next(call for call in calls if call[1] == "/health")
+        protected_call = next(call for call in calls if call[1] == "/status")
+        self.assertNotIn("Authorization", health_call[3])
+        self.assertEqual(protected_call[3]["Authorization"], "Bearer " + ("a" * 64))
+        self.assertTrue(any(call[1] == "/tabs/navigate" for call in calls))
+        self.assertFalse(any(call[1] in {"/eval", "/action/post"} for call in calls))
+
+    def test_agent_web_browser_rejects_lookalikes_and_unsafe_mode(self) -> None:
+        """Keep the integration on exact first-party hosts with all write gates off."""
+        client = AgentWebBrowserClient(token="b" * 64, transport=lambda *args: {"ok": True})
+        with self.assertRaises(AgentWebBrowserError):
+            client.read_job_page(
+                "https://glassdoor.com.evil.example/job/123",
+                "glassdoor",
+                poll_attempts=1,
+            )
+        with patch.dict("os.environ", {"SMAB_ALLOW_WRITES": "1"}):
+            with self.assertRaises(AgentWebBrowserError):
+                AgentWebBrowserClient(token="b" * 64, transport=lambda *args: {"ok": True})
+        unicode_token_client = AgentWebBrowserClient(
+            token="é" * 64,
+            transport=lambda *args: {"ok": True},
+        )
+        with self.assertRaises(AgentWebBrowserError):
+            unicode_token_client.status()
+
+    def test_agent_web_browser_recovers_blocked_board_for_employer_resolution(self) -> None:
+        """Use AWB visible text when WebClaw cannot read a board, then resolve the ATS page."""
+        board_url = "https://www.ziprecruiter.com/jobs/recruiting-coordinator-123"
+        employer_url = "https://job-boards.greenhouse.io/acme/jobs/123"
+        description = "About the role. Responsibilities and qualifications. " * 12
+
+        class BlockedBoardWebClaw:
+            def scrape(self, url):
+                if url == board_url:
+                    raise WebClawError("HTTP 403")
+                return {
+                    "metadata": {"title": "Recruiting Coordinator | Acme"},
+                    "content": {"plain_text": description},
+                    "structured_data": [{
+                        "@type": "JobPosting",
+                        "title": "Recruiting Coordinator",
+                        "hiringOrganization": {"name": "Acme"},
+                        "description": description,
+                    }],
+                }
+
+            def search(self, query, num=8, country="us", language="en"):
+                return [{"link": employer_url}]
+
+        class VisibleBoard:
+            def read_job_page(self, url, board):
+                return AgentWebBrowserPage(
+                    url=url,
+                    title="Recruiting Coordinator | Acme",
+                    platform="ziprecruiter",
+                    text=description,
+                    text_length=len(description),
+                )
+
+        job, resolution = resolve_employer_application(
+            BlockedBoardWebClaw(),
+            board_url,
+            browser_client=VisibleBoard(),
+        )
+        self.assertEqual(job.url, employer_url)
+        self.assertTrue(is_webclaw_verified(job))
+        self.assertEqual(resolution["source_reader"], "agent_web_browser")
 
     def test_resume_matcher_client_projects_ats_evidence(self) -> None:
         """Verify Agent B's adapter calls the documented API contract only."""

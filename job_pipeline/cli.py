@@ -14,7 +14,14 @@ from urllib.parse import urlsplit
 
 from .agents import ApplicationAgent, MatchAnalystAgent, RecruiterAgent, load_application_profile
 from .application_history import partition_previously_applied
+from .discovery_fallback import (
+    is_webclaw_verified,
+    verify_discovered_jobs,
+    webclaw_fallback_discovery,
+)
 from .integrations import (
+    AgentWebBrowserClient,
+    AgentWebBrowserError,
     BrowserUseError,
     BrowserUseRunner,
     DiscoveryError,
@@ -191,6 +198,22 @@ def score_jobs(
     return count
 
 
+def score_verified_jobs(
+    store: JobStore,
+    jobs: Iterable[Job],
+    profile: dict[str, Any],
+    resume_text: str,
+) -> int:
+    """Score only jobs carrying a successful WebClaw active-page receipt."""
+    count = 0
+    for job in jobs:
+        if not is_webclaw_verified(job):
+            continue
+        store.upsert_match(score_job(job, profile, resume_text))
+        count += 1
+    return count
+
+
 def _read_urls_file(path: Path | None) -> list[str]:
     """Read non-empty, non-comment URL lines from an optional text file."""
     if not path:
@@ -242,6 +265,17 @@ def command_doctor(args: argparse.Namespace, root: Path) -> int:
     browser_python = root / "tools" / "browser-use-runtime" / "Scripts" / "python.exe"
     print(f"JobSpy runtime: {'installed' if jobspy_python.exists() else 'not installed'}")
     print(f"browser-use runtime: {'installed' if browser_python.exists() else 'not installed'}")
+    try:
+        awb = AgentWebBrowserClient(
+            base_url=os.environ.get("AGENT_WEB_BROWSER_URL", "http://127.0.0.1:7896")
+        )
+        if awb.available():
+            awb.status()
+            print("Agent Web Browser: running, authenticated, safe read-only mode")
+        else:
+            print("Agent Web Browser: installed source may be present; local bridge is not running")
+    except AgentWebBrowserError as exc:
+        print(f"Agent Web Browser: unavailable ({exc})")
     matcher_url = os.environ.get("RESUME_MATCHER_URL", "http://127.0.0.1:3000/api/v1")
     print(f"Resume-Matcher URL: {matcher_url} (health is checked only when requested)")
     return 0
@@ -456,20 +490,79 @@ def command_agent_a(args: argparse.Namespace, root: Path) -> int:
 
 
 def command_agent_a_find(args: argparse.Namespace, root: Path) -> int:
-    """Agent A: discover multiple boards through one replaceable provider call."""
+    """Run optimized discovery, WebClaw coverage fallback, and the verification gate."""
     if args.provider != "jobspy":
         raise DiscoveryError(f"Unknown discovery provider: {args.provider}")
     provider = JobSpySource()
-    discovered_jobs = provider.search(
+    jobspy_jobs = provider.search(
         search_term=args.query,
         location=args.location,
         hours_old=args.hours_old,
         results_wanted=args.results_wanted,
         sites=args.site or ["linkedin", "indeed", "glassdoor", "zip_recruiter"],
         country=args.country,
+        glassdoor_location=args.glassdoor_location,
     )
-    jobs, previously_applied = partition_previously_applied(
-        discovered_jobs, root / "data" / "applied_jobs.json"
+    client = _client(root, args)
+    browser_client: AgentWebBrowserClient | None = None
+    browser_diagnostics: dict[str, Any] = {
+        "enabled": not args.no_agent_web_browser,
+        "available": False,
+        "mode": "read_only_job_board_fallback",
+    }
+    if not args.no_agent_web_browser:
+        try:
+            candidate_browser = AgentWebBrowserClient(
+                base_url=args.agent_web_browser_url
+            )
+            if candidate_browser.available():
+                candidate_browser.status()
+                browser_client = candidate_browser
+                browser_diagnostics["available"] = True
+                browser_diagnostics["platforms"] = [
+                    item.get("slug")
+                    for item in candidate_browser.platforms()
+                    if item.get("slug") in {"glassdoor", "ziprecruiter"}
+                ]
+            else:
+                browser_diagnostics["reason"] = "local bridge is not running"
+        except AgentWebBrowserError as exc:
+            browser_diagnostics["reason"] = str(exc)
+    fallback_sites = provider.last_diagnostics.get("fallback_sites", [])
+    fallback_jobs: list[Job] = []
+    fallback_diagnostics: dict[str, Any] = {
+        "requested_boards": [],
+        "status": "not_needed",
+        "resolved_active_jobs": 0,
+    }
+    if fallback_sites and not args.no_webclaw_fallback:
+        fallback_jobs, fallback_diagnostics = webclaw_fallback_discovery(
+            client,
+            search_term=args.query,
+            location=args.location,
+            hours_old=args.hours_old,
+            boards=fallback_sites,
+            results_wanted=args.results_wanted,
+            browser_client=browser_client,
+        )
+    elif fallback_sites:
+        fallback_diagnostics = {
+            "requested_boards": fallback_sites,
+            "status": "disabled_by_flag",
+            "resolved_active_jobs": 0,
+        }
+
+    combined: dict[str, Job] = {}
+    for job in [*jobspy_jobs, *fallback_jobs]:
+        combined.setdefault(job.url, job)
+    candidate_jobs, previously_applied = partition_previously_applied(
+        combined.values(), root / "data" / "applied_jobs.json"
+    )
+    verified_jobs, verification_errors = verify_discovered_jobs(
+        client,
+        candidate_jobs,
+        concurrency=args.concurrency,
+        browser_client=browser_client,
     )
     provider.last_diagnostics["previously_applied_count"] = len(previously_applied)
     provider.last_diagnostics["previously_applied"] = [
@@ -481,22 +574,37 @@ def command_agent_a_find(args: argparse.Namespace, root: Path) -> int:
         }
         for job in previously_applied
     ]
+    provider.last_diagnostics["webclaw_fallback"] = fallback_diagnostics
+    provider.last_diagnostics["agent_web_browser"] = browser_diagnostics
+    provider.last_diagnostics["candidate_count_before_verification"] = len(candidate_jobs)
+    provider.last_diagnostics["verified_active_count"] = len(verified_jobs)
+    provider.last_diagnostics["verification_errors"] = verification_errors
+    provider.last_diagnostics["scoring_gate"] = {
+        "rule": "score_only_webclaw_verified_active_postings",
+        "eligible_job_ids": [job.id for job in verified_jobs],
+        "excluded_count": len(candidate_jobs) - len(verified_jobs),
+    }
     discovery_output = root / "data" / "agent_a_discovery.json"
     write_json(discovery_output, {
-        "schema_version": 1,
+        "schema_version": 2,
         "created_at": utc_now(),
         "query": args.query,
         "location": args.location,
         "hours_old": args.hours_old,
         "diagnostics": provider.last_diagnostics,
     })
-    if not discovered_jobs:
+    if not jobspy_jobs and not fallback_jobs:
         errors = provider.last_diagnostics.get("normalization_errors", [])
-        detail = "; ".join(errors[:3]) if errors else "all selected boards returned zero records"
-        raise DiscoveryError(
-            f"JobSpy returned no usable jobs ({detail}). Review {discovery_output} and select a fallback."
+        fallback_errors = fallback_diagnostics.get("search_errors_by_board", {})
+        detail = (
+            "; ".join(errors[:3])
+            or "; ".join(f"{site}: {message}" for site, message in fallback_errors.items())
+            or "all selected boards and fallback searches returned zero records"
         )
-    if not jobs:
+        raise DiscoveryError(
+            f"No usable discovery candidates were returned ({detail}). Review {discovery_output}."
+        )
+    if not candidate_jobs:
         output = args.output or (root / "data" / "agent_a_findings.json")
         write_json(output, {
             "schema_version": 1,
@@ -507,30 +615,36 @@ def command_agent_a_find(args: argparse.Namespace, root: Path) -> int:
             "records": [],
         })
         print(
-            f"Agent A discovered {len(discovered_jobs)} normalized jobs through {provider.name}; "
+            f"Agent A discovered {len(combined)} normalized jobs; "
             f"all {len(previously_applied)} were already applied. Findings: {output}"
         )
         return 0
+    if not verified_jobs:
+        raise DiscoveryError(
+            "No candidate passed WebClaw employer-page active verification, so Agent B scored "
+            f"nothing. Review {discovery_output}."
+        )
     profile = load_profile(root)
     database = _agent_database(args, root)
     with JobStore(database) as store:
-        stored = store.upsert_jobs(jobs)
-        score_jobs(store, profile, _resume_text(args))
+        stored = store.upsert_jobs(verified_jobs)
+        scored = score_verified_jobs(store, verified_jobs, profile, _resume_text(args))
         report_paths = _export(store, profile, root, args.report_min_score)
     print(
-        f"Agent A discovered {stored} normalized jobs through {provider.name}. "
+        f"Agent A found {len(combined)} candidates; WebClaw verified {stored} active employer "
+        f"postings and Agent B scored {scored}. "
         f"Report: {report_paths[0]}"
     )
     if previously_applied:
         print(f"Agent A omitted {len(previously_applied)} previously applied role(s).")
-    if provider.last_diagnostics.get("fallback_recommended"):
-        missing = ", ".join(provider.last_diagnostics.get("sites_without_results", []))
+    if fallback_sites:
+        missing = ", ".join(fallback_sites)
         print(
-            f"Provider coverage was degraded for: {missing}. "
-            f"Review {discovery_output} and use the WebClaw fallback if needed."
+            f"JobSpy coverage was unavailable or empty for {missing}; WebClaw fallback status: "
+            f"{fallback_diagnostics.get('status', 'unknown')}."
         )
     # Reuse the established recruiter triage contract for the exact discovered IDs.
-    args.job_id = [job.id for job in jobs]
+    args.job_id = [job.id for job in verified_jobs]
     return command_agent_a(args, root)
 
 
@@ -853,8 +967,21 @@ def build_parser() -> argparse.ArgumentParser:
     agent_a_find.add_argument("--query", default="Recruiting Coordinator")
     agent_a_find.add_argument("--location", default="United States")
     agent_a_find.add_argument("--country", default="USA")
+    agent_a_find.add_argument(
+        "--glassdoor-location",
+        help=(
+            "city/state location used only for Glassdoor; broad Bay Area aliases "
+            "are normalized automatically"
+        ),
+    )
     agent_a_find.add_argument("--hours-old", type=int, default=168)
     agent_a_find.add_argument("--results-wanted", type=int, default=10)
+    agent_a_find.add_argument(
+        "--concurrency",
+        type=int,
+        default=4,
+        help="maximum concurrent WebClaw employer-page verification requests",
+    )
     agent_a_find.add_argument(
         "--site",
         action="append",
@@ -867,6 +994,21 @@ def build_parser() -> argparse.ArgumentParser:
     agent_a_find.add_argument("--report-min-score", type=float, default=0)
     agent_a_find.add_argument("--database", type=Path)
     agent_a_find.add_argument("--output", type=Path)
+    agent_a_find.add_argument(
+        "--no-webclaw-fallback",
+        action="store_true",
+        help="disable missing-board search fallback; active-page verification still runs",
+    )
+    agent_a_find.add_argument(
+        "--agent-web-browser-url",
+        default=os.environ.get("AGENT_WEB_BROWSER_URL", "http://127.0.0.1:7896"),
+        help="authenticated local AWB bridge used only for Glassdoor/ZipRecruiter reads",
+    )
+    agent_a_find.add_argument(
+        "--no-agent-web-browser",
+        action="store_true",
+        help="disable the optional local AWB read-only fallback",
+    )
     _add_resume_option(agent_a_find)
     agent_a_find.set_defaults(handler=command_agent_a_find)
 
@@ -944,6 +1086,7 @@ def main(argv: list[str] | None = None) -> int:
         return int(args.handler(args, root))
     except (
         BrowserUseError,
+        AgentWebBrowserError,
         DiscoveryError,
         FileNotFoundError,
         ResumeError,

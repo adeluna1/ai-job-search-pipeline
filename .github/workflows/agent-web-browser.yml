@@ -1,0 +1,33 @@
+name: Agent Web Browser Contract
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "job_pipeline/integrations/agent_web_browser.py"
+      - "patches/agent-web-browser/**"
+      - "scripts/install-agent-web-browser.ps1"
+      - ".github/workflows/agent-web-browser.yml"
+  pull_request:
+    paths:
+      - "job_pipeline/integrations/agent_web_browser.py"
+      - "patches/agent-web-browser/**"
+      - "scripts/install-agent-web-browser.ps1"
+      - ".github/workflows/agent-web-browser.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  upstream-contract:
+    runs-on: windows-latest
+    steps:
+      - name: Check out pipeline
+        uses: actions/checkout@v4
+      - name: Select Rust stable
+        run: rustup default stable
+      - name: Clone, patch, and test reviewed AWB source
+        shell: powershell
+        run: .\scripts\install-agent-web-browser.ps1 -RunTests
+      - name: Validate MCP server syntax
+        run: node --check tools/upstream/agent-web-browser/mcp-server/index.js

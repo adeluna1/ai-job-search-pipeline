@@ -1,0 +1,52 @@
+diff --git a/src-tauri/src/api.rs b/src-tauri/src/api.rs
+index a32c407..e65e1a3 100644
+--- a/src-tauri/src/api.rs
++++ b/src-tauri/src/api.rs
+@@ -456,12 +456,14 @@ fn validate_api_navigation(raw: &str) -> Result<String, String> {
+         "youtube.com",
+         "youtu.be",
+         "twitch.tv",
++        "glassdoor.com",
++        "ziprecruiter.com",
+     ]
+     .iter()
+     .any(|expected| exact_or_subdomain(&host, expected));
+     if !allowed && !opt_in_enabled("SMAB_ALLOW_ARBITRARY_NAVIGATION") {
+         return Err(
+-            "agent navigation is restricted to supported social platforms; \
++            "agent navigation is restricted to supported first-party platforms; \
+              set SMAB_ALLOW_ARBITRARY_NAVIGATION=1 for an operator-approved session"
+                 .into(),
+         );
+diff --git a/src/index.html b/src/index.html
+index 68dd1a2..c833915 100644
+--- a/src/index.html
++++ b/src/index.html
+@@ -168,6 +168,10 @@
+       finally { isCreating = false; }
+     }
+     async function switchTab(id) { if (activeTabId === id) return; try { await invoke('switch_tab', { tabId: id }); activeTabId = id; renderTabs(); updateNavButtons(); } catch (e) { console.error('switchTab:', e); } }
++    // Expose tab actions to the authenticated loopback bridge.
++    window.createTab = createTab;
++    window.switchTab = switchTab;
++
+     async function closeTab(id) {
+       const idx = tabs.findIndex(t => t.id === id); if (idx === -1) return;
+       try { await invoke('close_tab', { tabId: id }); tabs.splice(idx, 1); delete tabNavState[id];
+@@ -404,14 +408,14 @@
+     // opened here so every platform is ready the moment SMAB starts. Discord is
+     // LAST on purpose — it's the highest ban-risk, and its writes are gated +
+     // circuit-broken, so it loads but stays passive until you act on it.
+-    const STARTUP_TABS = ['instagram', 'facebook', 'twitter', 'youtube', 'twitch', 'discord'];
++    const STARTUP_TABS = ['instagram', 'facebook', 'twitter', 'youtube', 'twitch', 'glassdoor', 'ziprecruiter', 'discord'];
+     (async () => {
+       await new Promise((resolve, reject) => { if (window.__TAURI__?.core?.invoke) resolve(); else { const start = Date.now(); const i = setInterval(() => { if (window.__TAURI__?.core?.invoke) { clearInterval(i); resolve(); } else if (Date.now() - start > 5000) { clearInterval(i); reject(new Error('IPC timeout')); } }, 50); } });
+       await ensureApiToken();
+       const first = P_BY_SLUG[STARTUP_TABS[0]] || P_BY_SLUG.discord;
+       tabs = [{ id: 0, title: first.label, url: first.home, platform: first.slug }];
+       activeTabId = 0; nextId = 1; tabNavState[0] = { canGoBack: false, canGoForward: false }; renderTabs();
+-      // Open the remaining startup platforms, each in its own tab.
++      // Open the remaining startup platforms, including the two read-only job boards.
+       for (let k = 1; k < STARTUP_TABS.length; k++) {
+         const p = P_BY_SLUG[STARTUP_TABS[k]];
+         if (!p) continue;

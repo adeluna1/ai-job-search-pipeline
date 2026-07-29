@@ -8,6 +8,8 @@ can replace JobSpy without changing the A -> B -> C workflow.
 from __future__ import annotations
 
 import math
+import logging
+import re
 from datetime import date, datetime
 from typing import Any, Callable, Protocol
 
@@ -17,6 +19,36 @@ from ..util import canonical_url, normalize_space, stable_id, utc_now
 
 class DiscoveryError(RuntimeError):
     """Raised when an optional discovery provider cannot return usable jobs."""
+
+
+class _BoardLogCapture(logging.Handler):
+    """Capture one JobSpy board's swallowed HTTP errors for run diagnostics."""
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.WARNING)
+        self.messages: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.messages.append(record.getMessage())
+
+
+def _board_logger_name(site: str) -> str:
+    """Map canonical JobSpy site names to the loggers used by its scrapers."""
+    names = {
+        "linkedin": "LinkedIn",
+        "indeed": "Indeed",
+        "glassdoor": "Glassdoor",
+        "zip_recruiter": "ZipRecruiter",
+        "google": "Google",
+    }
+    return f"JobSpy:{names.get(site, site)}"
+
+
+def _http_block_status(messages: list[str]) -> int | None:
+    """Return a non-retryable HTTP 400/403 code found in captured board logs."""
+    text = " ".join(messages)
+    match = re.search(r"(?:status\s+code|response|http)\D{0,12}(400|403)\b", text, re.IGNORECASE)
+    return int(match.group(1)) if match else None
 
 
 class DiscoveryProvider(Protocol):
@@ -32,8 +64,9 @@ class DiscoveryProvider(Protocol):
         results_wanted: int,
         sites: list[str],
         country: str = "USA",
+        glassdoor_location: str | None = None,
     ) -> list[Job]:
-        """Return normalized jobs from one bounded discovery request."""
+        """Return normalized jobs from one bounded, provider-safe search operation."""
 
 
 def _clean(value: Any) -> str:
@@ -130,6 +163,31 @@ def normalize_jobspy_row(row: dict[str, Any]) -> Job:
     )
 
 
+def normalize_us_city_location(location: str) -> str:
+    """Return a direct Bay Area city with the state name written in full."""
+    value = normalize_space(location)
+    aliases = {
+        "bay area": "San Francisco, California",
+        "san francisco bay area": "San Francisco, California",
+        "sf bay area": "San Francisco, California",
+        "silicon valley": "San Jose, California",
+        "san francisco": "San Francisco, California",
+        "san francisco, ca": "San Francisco, California",
+        "san francisco california": "San Francisco, California",
+        "san francisco, california": "San Francisco, California",
+        "san jose": "San Jose, California",
+        "san jose, ca": "San Jose, California",
+        "san jose california": "San Jose, California",
+        "san jose, california": "San Jose, California",
+    }
+    return aliases.get(value.casefold(), value)
+
+
+def normalize_glassdoor_location(location: str) -> str:
+    """Translate broad Bay Area labels into direct Glassdoor city searches."""
+    return normalize_us_city_location(location)
+
+
 class JobSpySource:
     """Agent A discovery provider backed by speedyapply/JobSpy."""
 
@@ -160,30 +218,75 @@ class JobSpySource:
         results_wanted: int,
         sites: list[str],
         country: str = "USA",
+        glassdoor_location: str | None = None,
     ) -> list[Job]:
-        """Run all selected boards in one JobSpy call and normalize the dataframe."""
+        """Run each board with only its supported location parameters."""
         selected = [site.casefold() for site in sites]
         invalid = sorted(set(selected) - set(self.supported_sites))
         if invalid:
             raise DiscoveryError("Unsupported JobSpy site(s): " + ", ".join(invalid))
-        try:
-            result = self._load_scraper()(
-                site_name=selected,
-                search_term=search_term,
-                location=location,
-                results_wanted=max(1, min(int(results_wanted), 50)),
-                hours_old=max(1, int(hours_old)),
-                country_indeed=country,
-                linkedin_fetch_description=True,
+        query_locations: dict[str, str] = {}
+        calls: list[tuple[str, str]] = []
+        for site in selected:
+            requested_location = (
+                glassdoor_location if site == "glassdoor" and glassdoor_location else location
             )
-        except Exception as exc:  # third-party providers expose heterogeneous errors
-            raise DiscoveryError(f"JobSpy search failed: {exc}") from exc
-        if isinstance(result, list):
-            rows = result
-        elif hasattr(result, "to_dict"):
-            rows = result.to_dict(orient="records")
-        else:
-            raise DiscoveryError("JobSpy returned an unsupported result type.")
+            call_location = (
+                normalize_us_city_location(requested_location)
+                if site in {"indeed", "glassdoor", "zip_recruiter"}
+                else normalize_space(requested_location)
+            )
+            query_locations[site] = call_location
+            calls.append((site, call_location))
+
+        rows: list[dict[str, Any]] = []
+        provider_errors: list[str] = []
+        board_logs: dict[str, list[str]] = {}
+        board_status: dict[str, str] = {}
+        attempts_by_site: dict[str, int] = {}
+        scraper = self._load_scraper()
+        for call_site, call_location in calls:
+            attempts_by_site[call_site] = 1
+            scraper_options = {
+                "site_name": [call_site],
+                "search_term": search_term,
+                "location": call_location,
+                "results_wanted": max(1, min(int(results_wanted), 50)),
+                "hours_old": max(1, int(hours_old)),
+                "linkedin_fetch_description": True,
+            }
+            if call_site in {"indeed", "glassdoor"}:
+                scraper_options["country_indeed"] = country
+            capture = _BoardLogCapture()
+            board_logger = logging.getLogger(_board_logger_name(call_site))
+            board_logger.addHandler(capture)
+            try:
+                result = scraper(**scraper_options)
+            except Exception as exc:  # third-party providers expose heterogeneous errors
+                provider_errors.append(f"{call_site}: {exc}")
+                board_status[call_site] = "error"
+                continue
+            finally:
+                board_logger.removeHandler(capture)
+                board_logs[call_site] = capture.messages
+            if isinstance(result, list):
+                call_rows = result
+            elif hasattr(result, "to_dict"):
+                call_rows = result.to_dict(orient="records")
+            else:
+                provider_errors.append(
+                    f"{call_site}: JobSpy returned an unsupported result type"
+                )
+                board_status[call_site] = "error"
+                continue
+            rows.extend(call_rows)
+            blocked_code = _http_block_status(capture.messages)
+            if blocked_code:
+                board_status[call_site] = f"blocked_{blocked_code}"
+            elif call_rows:
+                board_status[call_site] = "ok"
+            else:
+                board_status[call_site] = "empty"
         jobs: list[Job] = []
         errors: list[str] = []
         for index, row in enumerate(rows):
@@ -200,17 +303,52 @@ class JobSpySource:
             counts[site] = counts.get(site, 0) + 1
         sites_with_results = [site for site in selected if counts.get(site, 0) > 0]
         sites_without_results = [site for site in selected if counts.get(site, 0) == 0]
+        for site in selected:
+            if counts.get(site, 0) > 0:
+                board_status[site] = "ok"
+            elif site not in board_status:
+                board_status[site] = "error"
+        blocked_sites = [
+            site for site, status in board_status.items() if status in {"blocked_400", "blocked_403"}
+        ]
         self.last_diagnostics = {
             "provider": self.name,
             "requested_sites": selected,
+            "query_locations_by_site": query_locations,
+            "parameter_strategy_by_site": {
+                site: (
+                    "country_indeed_plus_full_city_state"
+                    if site in {"indeed", "glassdoor"}
+                    else "location_only_full_city_state"
+                    if site == "zip_recruiter"
+                    else "provider_default"
+                )
+                for site in selected
+            },
             "result_counts_by_site": counts,
+            "attempts_by_site": attempts_by_site,
+            "status_by_site": board_status,
             "sites_with_results": sites_with_results,
             "sites_without_results": sites_without_results,
+            "blocked_sites": blocked_sites,
+            "circuit_breakers": {
+                site: {
+                    "open": site in blocked_sites,
+                    "reason": board_status[site] if site in blocked_sites else "",
+                    "retry_in_current_run": False if site in blocked_sites else None,
+                }
+                for site in selected
+            },
+            "captured_board_logs": {
+                site: messages[-5:] for site, messages in board_logs.items() if messages
+            },
+            "provider_errors": provider_errors,
             "normalization_errors": errors,
-            "fallback_recommended": len(sites_with_results) <= len(selected) / 2,
+            "fallback_sites": sites_without_results,
+            "fallback_recommended": bool(sites_without_results),
             "note": (
-                "A site with zero records may have no matching roles or may have rejected the request; "
-                "review JobSpy logs before selecting a fallback provider."
+                "Every board is called once. HTTP 400/403 opens that board's circuit breaker for "
+                "the current run. Empty, blocked, and errored boards are eligible for WebClaw fallback."
             ),
         }
         return jobs
