@@ -6,7 +6,6 @@
     "years_experience": 10,
     "target_roles": [
       "Recruiting Coordinator",
-      "Senior Recruiting Coordinator",
       "Recruiting Operations Coordinator",
       "Talent Operations Coordinator",
       "Candidate Experience Coordinator",
@@ -14,6 +13,13 @@
       "Onboarding Coordinator",
       "People Operations Coordinator",
       "Talent Acquisition Coordinator",
+      "Junior Recruiter",
+      "Recruiter I",
+      "Associate Recruiter",
+      "Recruiting Associate",
+      "Talent Acquisition Associate",
+      "Talent Acquisition Specialist",
+      "University Recruiter",
       "Project Coordinator",
       "Operations Coordinator"
     ],
@@ -27,6 +33,8 @@
       "Menlo Park",
       "San Francisco",
       "South San Francisco",
+      "Oakland",
+      "Sacramento",
       "Bay Area",
       "Silicon Valley"
     ],
@@ -126,6 +134,12 @@
       "responsibilities": 0.1
     },
     "ai_blend_weight": 0.3
+  },
+  "posting_intelligence": {
+    "enabled": true,
+    "repost_window_days": 90,
+    "cross_listing_similarity": 0.92,
+    "warning_policy": "multiple_signals_require_review"
   },
   "source": {
     "resume_file_name": "Albert Deluna ResumeV1.docx",

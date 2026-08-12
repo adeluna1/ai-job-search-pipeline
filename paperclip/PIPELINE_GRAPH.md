@@ -12,19 +12,24 @@ flowchart LR
     W --> E["Employer URL resolution"]
     E -->|"board page unreadable"| AWB["AWB authenticated visible-text read"]
     AWB --> E
-    E --> V{"WebClaw confirms active employer posting?"}
+    E --> V{"Active page on exact ATS or employer domain?"}
     V -->|"No"| X["Exclude before scoring"]
-    V -->|"Yes"| A["Agent A: Recruiter handoff"]
+    V -->|"Yes"| R{"Suppressed, stale/uncertain, or outside exact geography?"}
+    R -->|"Yes"| X
+    R -->|"No"| T["Resume-weighted current-run top 10"]
+    T --> A["Agent A: Recruiter handoff"]
     A -->|"verified job IDs"| B["Agent B: Match scorer + verifier"]
     B -->|"optional authorized ATS evidence"| M["Resume-Matcher preview"]
     M --> B
-    B -->|"apply"| C["Agent C: Application Assistant"]
+    B -->|"verified apply"| HC{"Fresh integrity-bound handoff valid?"}
+    HC -->|"Yes"| C["Agent C: Application Assistant"]
+    HC -->|"No"| S
     B -->|"review"| U
     B -->|"skip"| X
-    C --> P["Private application packet"]
+    C --> P["Evidence-bound packet + ready_to_apply event"]
     P --> G{"Paperclip confirmation accepted?"}
     G -->|"No / pending"| S["Stop safely"]
-    G -->|"Yes, exact packet + action"| BU["browser-use exact-domain session"]
+    G -->|"Yes, exact packet + action"| BU["browser-use exact-domain session + applying event"]
     BU --> F["Fill reviewed fields"]
     F --> SR{"Employer success receipt?"}
     SR -->|"Yes"| D["Mark applied"]
@@ -35,8 +40,8 @@ flowchart LR
 
 | Agent | Input | Local command | Output | External authority |
 |---|---|---|---|---|
-| A | Search objective and corrected resume | `agent-a-find`, then `agent-a` | Verified active employer URLs plus board/fallback diagnostics | Public discovery and verification only |
-| B | Agent A verified job IDs | verified-only score; `agent-b`; optional Resume-Matcher | `apply`, `review`, or `skip` with deterministic and optional ATS evidence | Resume upload only after explicit service consent |
-| C | Agent B `apply` IDs and reviewed candidate profile | `agent-c`, then `agent-c-browser` | Private packet, hash-bound receipt, plan, and verified outcome | Only after accepted confirmation for exact packet/action |
+| A | Exact locations, 24h/7d window, corrected resume | `agent-a-find`, then `agent-a` | Current-run top 10 or fewer; active, in-area, known-date, unapplied URLs | Public discovery and verification only |
+| B | At most 10 Agent A IDs and exact scope | `agent-b --live`; optional Resume-Matcher | Direct-domain/freshness recheck plus integrity-bound handoffs for verified `apply` decisions | Resume upload only after explicit service consent |
+| C | Exact unexpired Agent B handoff and reviewed candidate profile | `agent-c`, then `agent-c-browser` | Evidence-bound packet, lifecycle events, hash-bound receipt, plan, and reviewed outcome | Only after accepted confirmation for exact packet/action |
 
 The agents are provisioned paused. This prevents assignments from starting model runs or external actions until the board user reviews the configuration and explicitly resumes the relevant agent.

@@ -7,13 +7,24 @@ import json
 import logging
 import os
 import sys
+from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import urlsplit
 
-from .agents import ApplicationAgent, MatchAnalystAgent, RecruiterAgent, load_application_profile
-from .application_history import partition_previously_applied
+from .agents import (
+    ApplicationAgent,
+    MatchAnalysis,
+    MatchAnalystAgent,
+    RecruiterAgent,
+    load_application_profile,
+)
+from .application_history import (
+    partition_previously_applied,
+    record_applied_entries,
+    sync_lifecycle_registry,
+)
 from .discovery_fallback import (
     is_webclaw_verified,
     verify_discovered_jobs,
@@ -29,9 +40,15 @@ from .integrations import (
     ResumeMatcherClient,
     ResumeMatcherError,
 )
+from .job_exclusions import partition_excluded_jobs
+from .geography import evaluate_geography, partition_by_geography
+from .handoff import build_agent_c_handoff, validate_agent_c_handoff
 from .jobs import Job, job_from_fixture, normalize_webclaw_job, validate_job
+from .lifecycle import APPLICATION_STATES
 from .matching import apply_ai_score, score_job
 from .report import export_reports
+from .posting_intelligence import enrich_jobs_with_posting_intelligence
+from .role_scope import partition_by_role_scope
 from .resume import ResumeError, extract_docx_text, redact_contact_details, resume_context, resume_terms
 from .storage import JobStore
 from .util import canonical_url, configure_logging, load_dotenv, read_json, unique_preserving_order, utc_now, write_json
@@ -39,7 +56,7 @@ from .webclaw import WebClawClient, WebClawError
 
 
 LOGGER = logging.getLogger(__name__)
-APPLICATION_STATES = ("new", "saved", "applied", "interviewing", "offer", "rejected", "withdrawn")
+MAX_AGENT_SHORTLIST = 10
 
 
 def project_root() -> Path:
@@ -54,6 +71,43 @@ def load_profile(root: Path) -> dict[str, Any]:
     if abs(sum(float(value) for value in weights.values()) - 1.0) > 0.001:
         raise ValueError("Scoring weights in config/profile.json must sum to 1.0.")
     return profile
+
+
+def _transition_application(
+    store: JobStore,
+    root: Path,
+    job: Job,
+    status: str,
+    notes: str = "",
+    *,
+    actor: str,
+    metadata: dict[str, Any] | None = None,
+    force: bool = False,
+) -> bool:
+    """Atomically mirror one lifecycle transition into rediscovery suppression."""
+    previous = store.application_state(job.id)
+    if not previous:
+        return False
+    registry_path = root / "data" / "applied_jobs.json"
+    try:
+        if not store.set_status(
+            job.id,
+            status,
+            notes,
+            actor=actor,
+            metadata=metadata,
+            force=force,
+            commit=False,
+        ):
+            return False
+        sync_lifecycle_registry(registry_path, job, status)
+        store.connection.commit()
+    except Exception:
+        store.connection.rollback()
+        # Restore the file-side projection when a later database operation fails.
+        sync_lifecycle_registry(registry_path, job, str(previous["status"]))
+        raise
+    return True
 
 
 def _is_probable_job_url(url: str) -> bool:
@@ -238,9 +292,22 @@ def _resume_text(args: argparse.Namespace) -> str:
     return resume_context(path) if path else ""
 
 
-def _export(store: JobStore, profile: dict[str, Any], root: Path, min_score: float, prefix: str = "job_matches") -> tuple[Path, Path]:
+def _export(
+    store: JobStore,
+    profile: dict[str, Any],
+    root: Path,
+    min_score: float,
+    prefix: str = "job_matches",
+    job_ids: Iterable[str] | None = None,
+    limit: int | None = None,
+) -> tuple[Path, Path]:
     """Export joined ranking records to HTML and CSV."""
     records = store.ranked(min_score=min_score)
+    if job_ids is not None:
+        allowed = set(job_ids)
+        records = [record for record in records if record["id"] in allowed]
+    if limit is not None:
+        records = records[:max(0, int(limit))]
     threshold = float(profile["scoring"].get("strong_fit_threshold", 72))
     return export_reports(records, root / "reports", threshold, prefix=prefix)
 
@@ -356,10 +423,30 @@ def command_report(args: argparse.Namespace, root: Path) -> int:
 def command_status(args: argparse.Namespace, root: Path) -> int:
     """Update the manual application tracker for one job ID."""
     with JobStore(root / "data" / "jobs.sqlite3") as store:
-        if not store.set_status(args.job_id, args.state, args.notes):
+        job = store.job(args.job_id)
+        if not job or not _transition_application(
+            store,
+            root,
+            job,
+            args.state,
+            args.notes,
+            actor="manual",
+            force=args.force,
+        ):
             print(f"Unknown job ID: {args.job_id}", file=sys.stderr)
             return 2
     print(f"Updated {args.job_id} to {args.state}.")
+    return 0
+
+
+def command_applied_import(args: argparse.Namespace, root: Path) -> int:
+    """Import reviewed company/title exclusions from a small local JSON file."""
+    payload = read_json(args.input)
+    entries = payload if isinstance(payload, list) else payload.get("jobs", [])
+    if not isinstance(entries, list):
+        raise ValueError("Applied import must be a JSON list or an object with a jobs list.")
+    count = record_applied_entries(root / "data" / "applied_jobs.json", entries)
+    print(f"Imported {count} applied-role row(s) into the local exclusion registry.")
     return 0
 
 
@@ -455,16 +542,40 @@ def command_agent_a(args: argparse.Namespace, root: Path) -> int:
         else float(profile["scoring"].get("strong_fit_threshold", 72))
     )
     records: list[dict[str, Any]] = []
+    requested_locations = list(getattr(args, "location", None) or [])
+    if not requested_locations:
+        discovery_path = root / "data" / "agent_a_discovery.json"
+        if discovery_path.exists():
+            requested_locations = list(read_json(discovery_path).get("locations", []))
     with JobStore(_agent_database(args, root)) as store:
-        for job in _selected_jobs(store, args.job_id):
+        jobs = _selected_jobs(store, args.job_id)
+        if len(jobs) > MAX_AGENT_SHORTLIST:
+            raise ValueError(
+                f"Agent A accepts at most {MAX_AGENT_SHORTLIST} current-run IDs; received {len(jobs)}."
+            )
+        for job in jobs:
             match = store.match(job.id)
-            finding = RecruiterAgent().inspect(job, fresh_days=args.fresh_days)
+            finding = RecruiterAgent().inspect(
+                job,
+                fresh_days=args.fresh_days,
+                fresh_hours=getattr(args, "fresh_hours", None),
+            )
             score = match.final_score if match else None
+            _, already_applied = partition_previously_applied(
+                [job], root / "data" / "applied_jobs.json"
+            )
+            geography = (
+                evaluate_geography(job, requested_locations)
+                if requested_locations
+                else None
+            )
             eligible = bool(
                 finding.active
-                and finding.fresh is not False
+                and finding.fresh is True
                 and score is not None
                 and score >= threshold
+                and not already_applied
+                and (geography is None or geography.eligible)
             )
             records.append({
                 "job_id": job.id,
@@ -472,6 +583,9 @@ def command_agent_a(args: argparse.Namespace, root: Path) -> int:
                 "company": job.company,
                 "url": job.url,
                 "score": score,
+                "requested_locations": requested_locations,
+                "geography_eligible": geography.eligible if geography else None,
+                "previously_applied": bool(already_applied),
                 "eligible_for_agent_b": eligible,
                 "finding": finding.to_dict(),
             })
@@ -481,7 +595,10 @@ def command_agent_a(args: argparse.Namespace, root: Path) -> int:
         "agent": RecruiterAgent.name,
         "created_at": utc_now(),
         "fresh_days": args.fresh_days,
+        "fresh_hours": getattr(args, "fresh_hours", None),
         "min_score": threshold,
+        "requested_locations": requested_locations,
+        "maximum_results": MAX_AGENT_SHORTLIST,
         "records": records,
     })
     eligible_count = sum(1 for record in records if record["eligible_for_agent_b"])
@@ -493,16 +610,13 @@ def command_agent_a_find(args: argparse.Namespace, root: Path) -> int:
     """Run optimized discovery, WebClaw coverage fallback, and the verification gate."""
     if args.provider != "jobspy":
         raise DiscoveryError(f"Unknown discovery provider: {args.provider}")
-    provider = JobSpySource()
-    jobspy_jobs = provider.search(
-        search_term=args.query,
-        location=args.location,
-        hours_old=args.hours_old,
-        results_wanted=args.results_wanted,
-        sites=args.site or ["linkedin", "indeed", "glassdoor", "zip_recruiter"],
-        country=args.country,
-        glassdoor_location=args.glassdoor_location,
-    )
+    locations = list(args.location or ["United States"])
+    requested_max = int(getattr(args, "max_results", MAX_AGENT_SHORTLIST))
+    max_results = max(1, min(requested_max, MAX_AGENT_SHORTLIST))
+    effective_fresh_days = max(1, (max(1, int(args.hours_old)) + 23) // 24)
+    args.fresh_days = effective_fresh_days
+    args.fresh_hours = max(1, int(args.hours_old))
+    requested_sites = args.site or ["linkedin", "indeed", "glassdoor", "zip_recruiter"]
     client = _client(root, args)
     browser_client: AgentWebBrowserClient | None = None
     browser_diagnostics: dict[str, Any] = {
@@ -528,44 +642,235 @@ def command_agent_a_find(args: argparse.Namespace, root: Path) -> int:
                 browser_diagnostics["reason"] = "local bridge is not running"
         except AgentWebBrowserError as exc:
             browser_diagnostics["reason"] = str(exc)
-    fallback_sites = provider.last_diagnostics.get("fallback_sites", [])
+
+    jobspy_jobs: list[Job] = []
     fallback_jobs: list[Job] = []
-    fallback_diagnostics: dict[str, Any] = {
-        "requested_boards": [],
-        "status": "not_needed",
-        "resolved_active_jobs": 0,
-    }
-    if fallback_sites and not args.no_webclaw_fallback:
-        fallback_jobs, fallback_diagnostics = webclaw_fallback_discovery(
-            client,
+    location_runs: dict[str, dict[str, Any]] = {}
+    fallback_by_location: dict[str, dict[str, Any]] = {}
+    for location in locations:
+        provider = JobSpySource()
+        location_jobs = provider.search(
             search_term=args.query,
-            location=args.location,
+            location=location,
             hours_old=args.hours_old,
-            boards=fallback_sites,
             results_wanted=args.results_wanted,
-            browser_client=browser_client,
+            sites=requested_sites,
+            country=args.country,
+            glassdoor_location=args.glassdoor_location,
         )
-    elif fallback_sites:
-        fallback_diagnostics = {
-            "requested_boards": fallback_sites,
-            "status": "disabled_by_flag",
+        jobspy_jobs.extend(location_jobs)
+        location_diagnostics = deepcopy(provider.last_diagnostics)
+        location_fallback_sites = location_diagnostics.get("fallback_sites", [])
+        location_fallback: dict[str, Any] = {
+            "requested_boards": [],
+            "status": "not_needed",
             "resolved_active_jobs": 0,
         }
+        if location_fallback_sites and not args.no_webclaw_fallback:
+            discovered, location_fallback = webclaw_fallback_discovery(
+                client,
+                search_term=args.query,
+                location=location,
+                hours_old=args.hours_old,
+                boards=location_fallback_sites,
+                results_wanted=args.results_wanted,
+                browser_client=browser_client,
+            )
+            fallback_jobs.extend(discovered)
+        elif location_fallback_sites:
+            location_fallback = {
+                "requested_boards": location_fallback_sites,
+                "status": "disabled_by_flag",
+                "resolved_active_jobs": 0,
+            }
+        location_diagnostics["webclaw_fallback"] = location_fallback
+        location_runs[location] = location_diagnostics
+        fallback_by_location[location] = location_fallback
+
+    result_counts_by_site = {
+        site: sum(
+            int(run.get("result_counts_by_site", {}).get(site, 0))
+            for run in location_runs.values()
+        )
+        for site in requested_sites
+    }
+    attempts_by_site = {
+        site: sum(
+            int(run.get("attempts_by_site", {}).get(site, 0))
+            for run in location_runs.values()
+        )
+        for site in requested_sites
+    }
+    status_by_site: dict[str, str] = {}
+    for site in requested_sites:
+        statuses = [
+            str(run.get("status_by_site", {}).get(site, "not_attempted"))
+            for run in location_runs.values()
+        ]
+        if any(status == "ok" for status in statuses):
+            status_by_site[site] = "ok"
+        elif len(set(statuses)) == 1:
+            status_by_site[site] = statuses[0]
+        else:
+            status_by_site[site] = "degraded"
+    fallback_sites = unique_preserving_order(
+        site
+        for run in location_runs.values()
+        for site in run.get("fallback_sites", [])
+    )
+    captured_board_logs = {
+        site: [
+            message
+            for run in location_runs.values()
+            for message in run.get("captured_board_logs", {}).get(site, [])
+        ]
+        for site in requested_sites
+    }
+    fallback_statuses = [
+        str(item.get("status", "unknown"))
+        for item in fallback_by_location.values()
+        if item.get("requested_boards")
+    ]
+    if not fallback_sites:
+        fallback_status = "not_needed"
+    elif args.no_webclaw_fallback:
+        fallback_status = "disabled_by_flag"
+    elif any(status == "complete" for status in fallback_statuses):
+        fallback_status = "complete"
+    elif any(status == "unavailable" for status in fallback_statuses):
+        fallback_status = "unavailable"
+    elif fallback_statuses and all(
+        status == "no_verified_results" for status in fallback_statuses
+    ):
+        fallback_status = "no_verified_results"
+    else:
+        fallback_status = "degraded"
+    fallback_diagnostics: dict[str, Any] = {
+        "requested_boards": fallback_sites,
+        "status": fallback_status,
+        "status_by_location": {
+            location: item.get("status", "unknown")
+            for location, item in fallback_by_location.items()
+            if item.get("requested_boards")
+        },
+        "resolved_active_jobs": sum(
+            int(item.get("resolved_active_jobs", 0))
+            for item in fallback_by_location.values()
+        ),
+        "by_location": fallback_by_location,
+        "search_errors_by_location": {
+            location: item.get("search_errors_by_board", {})
+            for location, item in fallback_by_location.items()
+            if item.get("search_errors_by_board")
+        },
+    }
+    diagnostics: dict[str, Any] = {
+        "provider": "jobspy",
+        "locations": locations,
+        "location_runs": location_runs,
+        "requested_sites": requested_sites,
+        "query_locations_by_site": {
+            site: locations for site in requested_sites
+        },
+        "result_counts_by_site": result_counts_by_site,
+        "attempts_by_site": attempts_by_site,
+        "status_by_site": status_by_site,
+        "sites_with_results": [
+            site for site, count in result_counts_by_site.items() if count > 0
+        ],
+        "sites_without_results": [
+            site for site, count in result_counts_by_site.items() if count == 0
+        ],
+        "blocked_sites": [
+            site
+            for site, status in status_by_site.items()
+            if status.startswith("blocked_")
+        ],
+        "circuit_breakers": {
+            site: {
+                "open": any(
+                    bool(run.get("circuit_breakers", {}).get(site, {}).get("open"))
+                    for run in location_runs.values()
+                ),
+                "reasons": unique_preserving_order(
+                    str(run.get("circuit_breakers", {}).get(site, {}).get("reason", ""))
+                    for run in location_runs.values()
+                    if run.get("circuit_breakers", {}).get(site, {}).get("reason")
+                ),
+                "retry_in_current_run": False,
+            }
+            for site in requested_sites
+        },
+        "captured_board_logs": captured_board_logs,
+        "provider_errors": [
+            message
+            for run in location_runs.values()
+            for message in run.get("provider_errors", [])
+        ],
+        "normalization_errors": [
+            message
+            for run in location_runs.values()
+            for message in run.get("normalization_errors", [])
+        ],
+        "fallback_sites": fallback_sites,
+        "fallback_recommended": bool(fallback_sites),
+        "note": (
+            "Each board is called once per requested city. HTTP 400/403 opens that "
+            "board's city-level circuit breaker, and all locations are deduplicated "
+            "before one employer-page verification and scoring pass."
+        ),
+    }
 
     combined: dict[str, Job] = {}
     for job in [*jobspy_jobs, *fallback_jobs]:
         combined.setdefault(job.url, job)
-    candidate_jobs, previously_applied = partition_previously_applied(
-        combined.values(), root / "data" / "applied_jobs.json"
+    role_scoped_jobs, role_scope_rejections = partition_by_role_scope(
+        combined.values(), args.query
     )
-    verified_jobs, verification_errors = verify_discovered_jobs(
+    candidate_jobs, previously_applied = partition_previously_applied(
+        role_scoped_jobs, root / "data" / "applied_jobs.json"
+    )
+    candidate_jobs, explicitly_excluded = partition_excluded_jobs(
+        candidate_jobs, root / "data" / "job_exclusions.json"
+    )
+    live_verified_jobs, verification_errors = verify_discovered_jobs(
         client,
         candidate_jobs,
         concurrency=args.concurrency,
         browser_client=browser_client,
     )
-    provider.last_diagnostics["previously_applied_count"] = len(previously_applied)
-    provider.last_diagnostics["previously_applied"] = [
+    geography_eligible_jobs, geography_rejections = partition_by_geography(
+        live_verified_jobs, locations
+    )
+    verified_jobs: list[Job] = []
+    freshness_rejections: list[tuple[Job, dict[str, Any]]] = []
+    recruiter = RecruiterAgent()
+    for job in geography_eligible_jobs:
+        finding = recruiter.inspect(
+            job,
+            fresh_days=effective_fresh_days,
+            fresh_hours=args.fresh_hours,
+        )
+        if finding.fresh is True:
+            verified_jobs.append(job)
+        else:
+            freshness_rejections.append((job, finding.to_dict()))
+    diagnostics["previously_applied_count"] = len(previously_applied)
+    diagnostics["role_scope_gate"] = {
+        "query": args.query,
+        "eligible_count": len(role_scoped_jobs),
+        "rejected_count": len(role_scope_rejections),
+        "rejected": [
+            {
+                "job_id": job.id,
+                "title": job.title,
+                "company": job.company,
+                "reason": decision.reason,
+            }
+            for job, decision in role_scope_rejections
+        ],
+    }
+    diagnostics["previously_applied"] = [
         {
             "job_id": job.id,
             "title": job.title,
@@ -574,13 +879,58 @@ def command_agent_a_find(args: argparse.Namespace, root: Path) -> int:
         }
         for job in previously_applied
     ]
-    provider.last_diagnostics["webclaw_fallback"] = fallback_diagnostics
-    provider.last_diagnostics["agent_web_browser"] = browser_diagnostics
-    provider.last_diagnostics["candidate_count_before_verification"] = len(candidate_jobs)
-    provider.last_diagnostics["verified_active_count"] = len(verified_jobs)
-    provider.last_diagnostics["verification_errors"] = verification_errors
-    provider.last_diagnostics["scoring_gate"] = {
-        "rule": "score_only_webclaw_verified_active_postings",
+    diagnostics["explicitly_excluded_count"] = len(explicitly_excluded)
+    diagnostics["explicitly_excluded"] = [
+        {
+            "job_id": job.id,
+            "title": job.title,
+            "company": job.company,
+            "url": job.url,
+        }
+        for job in explicitly_excluded
+    ]
+    diagnostics["webclaw_fallback"] = fallback_diagnostics
+    diagnostics["agent_web_browser"] = browser_diagnostics
+    diagnostics["candidate_count_before_verification"] = len(candidate_jobs)
+    diagnostics["verified_active_count"] = len(live_verified_jobs)
+    diagnostics["verification_errors"] = verification_errors
+    diagnostics["geography_gate"] = {
+        "rule": "onsite_or_hybrid_must_match_requested_metro; remote_must_be_available_in_requested_scope",
+        "requested_locations": locations,
+        "eligible_count": len(geography_eligible_jobs),
+        "rejected_count": len(geography_rejections),
+        "rejected": [
+            {
+                "job_id": job.id,
+                "title": job.title,
+                "company": job.company,
+                "location": job.location,
+                "work_mode": job.work_mode,
+                "reason": decision.reason,
+            }
+            for job, decision in geography_rejections
+        ],
+    }
+    diagnostics["freshness_gate"] = {
+        "rule": "posting_time_interval_must_be_unambiguously_inside_requested_hour_window",
+        "hours_old": int(args.hours_old),
+        "effective_fresh_days": effective_fresh_days,
+        "strict_window_hours": args.fresh_hours,
+        "eligible_count": len(verified_jobs),
+        "rejected_count": len(freshness_rejections),
+        "rejected": [
+            {
+                "job_id": job.id,
+                "title": job.title,
+                "company": job.company,
+                "posted_date": job.posted_date,
+                "reason": finding["reasons"],
+            }
+            for job, finding in freshness_rejections
+        ],
+    }
+    diagnostics["scoring_gate"] = {
+        "rule": "score_only_verified_active_postings_inside_requested_geography",
         "eligible_job_ids": [job.id for job in verified_jobs],
         "excluded_count": len(candidate_jobs) - len(verified_jobs),
     }
@@ -589,16 +939,20 @@ def command_agent_a_find(args: argparse.Namespace, root: Path) -> int:
         "schema_version": 2,
         "created_at": utc_now(),
         "query": args.query,
-        "location": args.location,
+        "location": locations[0] if len(locations) == 1 else " | ".join(locations),
+        "locations": locations,
         "hours_old": args.hours_old,
-        "diagnostics": provider.last_diagnostics,
+        "diagnostics": diagnostics,
     })
     if not jobspy_jobs and not fallback_jobs:
-        errors = provider.last_diagnostics.get("normalization_errors", [])
-        fallback_errors = fallback_diagnostics.get("search_errors_by_board", {})
+        errors = diagnostics.get("normalization_errors", [])
+        fallback_errors = fallback_diagnostics.get("search_errors_by_location", {})
         detail = (
             "; ".join(errors[:3])
-            or "; ".join(f"{site}: {message}" for site, message in fallback_errors.items())
+            or "; ".join(
+                f"{location}: {messages}"
+                for location, messages in fallback_errors.items()
+            )
             or "all selected boards and fallback searches returned zero records"
         )
         raise DiscoveryError(
@@ -616,35 +970,133 @@ def command_agent_a_find(args: argparse.Namespace, root: Path) -> int:
         })
         print(
             f"Agent A discovered {len(combined)} normalized jobs; "
-            f"all {len(previously_applied)} were already applied. Findings: {output}"
+            f"{len(previously_applied)} were already applied and "
+            f"{len(explicitly_excluded)} were explicitly excluded. Findings: {output}"
         )
         return 0
     if not verified_jobs:
-        raise DiscoveryError(
-            "No candidate passed WebClaw employer-page active verification, so Agent B scored "
-            f"nothing. Review {discovery_output}."
+        profile = load_profile(root)
+        report_paths = export_reports(
+            [],
+            root / "reports",
+            float(profile["scoring"].get("strong_fit_threshold", 72)),
+            prefix="job_matches",
         )
+        output = args.output or (root / "data" / "agent_a_findings.json")
+        write_json(output, {
+            "schema_version": 1,
+            "agent": RecruiterAgent.name,
+            "created_at": utc_now(),
+            "fresh_days": effective_fresh_days,
+            "min_score": args.min_score,
+            "requested_locations": locations,
+            "maximum_results": MAX_AGENT_SHORTLIST,
+            "records": [],
+        })
+        print(
+            "No candidate passed employer-page verification, exact role, geography, "
+            f"and known-date freshness gates. Empty current-run report: {report_paths[0]}"
+        )
+        return 0
     profile = load_profile(root)
+    strong_fit_threshold = float(
+        args.min_score
+        if args.min_score is not None
+        else profile["scoring"].get("strong_fit_threshold", 72)
+    )
+    report_score_floor = max(float(args.report_min_score), strong_fit_threshold)
     database = _agent_database(args, root)
     with JobStore(database) as store:
+        intelligence_config = profile.get("posting_intelligence", {})
+        verified_jobs = enrich_jobs_with_posting_intelligence(
+            verified_jobs,
+            store.jobs(),
+            enabled=bool(intelligence_config.get("enabled", False)),
+            window_days=int(intelligence_config.get("repost_window_days", 90)),
+            cross_listing_threshold=float(
+                intelligence_config.get("cross_listing_similarity", 0.92)
+            ),
+        )
         stored = store.upsert_jobs(verified_jobs)
         scored = score_verified_jobs(store, verified_jobs, profile, _resume_text(args))
-        report_paths = _export(store, profile, root, args.report_min_score)
+        ranked_current = [
+            record
+            for record in store.ranked(min_score=report_score_floor)
+            if record["id"] in {job.id for job in verified_jobs}
+        ]
+        shortlist_ids = [record["id"] for record in ranked_current[:max_results]]
+        report_paths = _export(
+            store,
+            profile,
+            root,
+            report_score_floor,
+            job_ids=shortlist_ids,
+            limit=max_results,
+        )
+    intelligence_records = [
+        job.raw.get("posting_intelligence", {})
+        for job in verified_jobs
+        if isinstance(job.raw, dict) and job.raw.get("posting_intelligence")
+    ]
+    diagnostics["posting_intelligence"] = {
+        "enabled": bool(profile.get("posting_intelligence", {}).get("enabled", False)),
+        "rule": "advisory_only_never_changes_resume_match_score",
+        "evaluated_count": len(intelligence_records),
+        "low_trust_count": sum(
+            item.get("trust", {}).get("level") == "low" for item in intelligence_records
+        ),
+        "repost_count": sum(
+            bool(item.get("repost", {}).get("detected")) for item in intelligence_records
+        ),
+        "cross_listing_count": sum(
+            bool(item.get("cross_listings")) for item in intelligence_records
+        ),
+    }
+    diagnostics["shortlist_gate"] = {
+        "rule": "current_run_only_ranked_by_resume_fit",
+        "maximum": MAX_AGENT_SHORTLIST,
+        "requested": requested_max,
+        "selected_count": len(shortlist_ids),
+        "selected_job_ids": shortlist_ids,
+        "excluded_after_ranking": max(0, len(verified_jobs) - len(shortlist_ids)),
+    }
+    discovery_payload = read_json(discovery_output)
+    discovery_payload["diagnostics"] = diagnostics
+    write_json(discovery_output, discovery_payload)
     print(
-        f"Agent A found {len(combined)} candidates; WebClaw verified {stored} active employer "
-        f"postings and Agent B scored {scored}. "
+        f"Agent A found {len(combined)} candidates across {len(locations)} location(s); "
+        f"WebClaw verified {len(live_verified_jobs)} active employer postings; "
+        f"{stored} matched the requested geography, Agent B scored {scored}, and "
+        f"the report contains {len(shortlist_ids)} current-run role(s) (maximum 10). "
         f"Report: {report_paths[0]}"
     )
     if previously_applied:
         print(f"Agent A omitted {len(previously_applied)} previously applied role(s).")
+    if explicitly_excluded:
+        print(
+            f"Agent A omitted {len(explicitly_excluded)} closed, removed, "
+            "unverifiable, or previously sent role(s)."
+        )
     if fallback_sites:
         missing = ", ".join(fallback_sites)
         print(
             f"JobSpy coverage was unavailable or empty for {missing}; WebClaw fallback status: "
             f"{fallback_diagnostics.get('status', 'unknown')}."
         )
+    if not shortlist_ids:
+        output = args.output or (root / "data" / "agent_a_findings.json")
+        write_json(output, {
+            "schema_version": 1,
+            "agent": RecruiterAgent.name,
+            "created_at": utc_now(),
+            "fresh_days": args.fresh_days,
+            "min_score": args.min_score,
+            "records": [],
+        })
+        print(f"No current-run job met the report score floor. Findings: {output}")
+        return 0
     # Reuse the established recruiter triage contract for the exact discovered IDs.
-    args.job_id = [job.id for job in verified_jobs]
+    args.job_id = shortlist_ids
     return command_agent_a(args, root)
 
 
@@ -658,8 +1110,25 @@ def command_agent_b(args: argparse.Namespace, root: Path) -> int:
     )
     client = _client(root, args) if args.live else None
     records: list[dict[str, Any]] = []
+    discovery_path = root / "data" / "agent_a_discovery.json"
+    discovery_payload = read_json(discovery_path) if discovery_path.exists() else {}
+    requested_locations = list(getattr(args, "location", None) or [])
+    if not requested_locations:
+        requested_locations = list(discovery_payload.get("locations", []))
+    fresh_hours = getattr(args, "fresh_hours", None)
+    explicit_fresh_days = getattr(args, "fresh_days", None)
+    if fresh_hours is None and explicit_fresh_days is not None:
+        fresh_hours = int(explicit_fresh_days) * 24
+    if fresh_hours is None:
+        fresh_hours = int(discovery_payload.get("hours_old") or (7 * 24))
+    fresh_hours = max(1, int(fresh_hours))
+    fresh_days = max(1, (fresh_hours + 23) // 24)
     with JobStore(_agent_database(args, root)) as store:
         jobs = _selected_jobs(store, args.job_id)
+        if len(jobs) > MAX_AGENT_SHORTLIST:
+            raise ValueError(
+                f"Agent B accepts at most {MAX_AGENT_SHORTLIST} Agent A job IDs; received {len(jobs)}."
+            )
         external_assessments: dict[str, dict[str, Any]] = {}
         external_errors: dict[str, str] = {}
         if args.resume_matcher:
@@ -695,36 +1164,73 @@ def command_agent_b(args: argparse.Namespace, root: Path) -> int:
             match = store.match(job.id)
             if not match:
                 continue
-            finding = RecruiterAgent().inspect(job, fresh_days=args.fresh_days)
+            finding = RecruiterAgent().inspect(
+                job,
+                fresh_days=fresh_days,
+                fresh_hours=fresh_hours,
+            )
             analysis = MatchAnalystAgent().analyze(
                 job,
                 match,
                 finding,
                 threshold=threshold,
-                fresh_days=args.fresh_days,
+                fresh_days=fresh_days,
+                fresh_hours=fresh_hours,
                 client=client,
                 resume_matcher=external_assessments.get(job.id),
             )
+            if analysis.recommendation == "apply" and not analysis.live_verified:
+                analysis.recommendation = "review"
+                analysis.insights.append(
+                    "Agent C handoff withheld until Agent B reruns with --live and verifies the direct domain."
+                )
+            _, already_applied = partition_previously_applied(
+                [job], root / "data" / "applied_jobs.json"
+            )
+            geography = (
+                evaluate_geography(job, requested_locations)
+                if requested_locations
+                else None
+            )
+            if already_applied:
+                analysis.blockers.append("Role exists in the applied-job exclusion registry.")
+                analysis.recommendation = "skip"
+            if geography and not geography.eligible:
+                analysis.blockers.append(geography.reason)
+                analysis.recommendation = "skip"
             records.append({
                 "job_id": job.id,
                 "title": job.title,
                 "company": job.company,
                 "url": job.url,
+                "requested_locations": requested_locations,
+                "geography_eligible": geography.eligible if geography else None,
                 "analysis": analysis.to_dict(),
                 "resume_matcher_error": external_errors.get(job.id, ""),
             })
     output = args.output or (root / "data" / "agent_b_reviews.json")
+    created_at = utc_now()
+    handoffs = [
+        build_agent_c_handoff(record, created_at=created_at)
+        for record in records
+        if record["analysis"]["recommendation"] == "apply"
+    ]
     write_json(output, {
-        "schema_version": 1,
+        "schema_version": 2,
         "agent": MatchAnalystAgent.name,
-        "created_at": utc_now(),
+        "created_at": created_at,
         "threshold": threshold,
+        "fresh_hours": fresh_hours,
         "live_verification_requested": args.live,
         "resume_matcher_requested": args.resume_matcher,
         "records": records,
+        "agent_c_handoffs": handoffs,
     })
-    apply_count = sum(1 for record in records if record["analysis"]["recommendation"] == "apply")
-    print(f"Agent B reviewed {len(records)} jobs; {apply_count} recommended to apply. Reviews: {output}")
+    apply_count = len(handoffs)
+    print(
+        f"Agent B reviewed {len(records)} jobs; {apply_count} verified apply handoff(s) "
+        f"created for Agent C. Reviews: {output}"
+    )
     if external_errors:
         print(
             f"Resume-Matcher evidence was unavailable for {len(external_errors)} job(s); "
@@ -734,35 +1240,51 @@ def command_agent_b(args: argparse.Namespace, root: Path) -> int:
 
 
 def command_agent_c(args: argparse.Namespace, root: Path) -> int:
-    """Agent C: prepare one truthful application packet and stop for board approval."""
-    profile = load_profile(root)
-    threshold = float(profile["scoring"].get("strong_fit_threshold", 72))
-    application_profile = load_application_profile(args.application_profile)
+    """Agent C: consume one verified Agent B handoff and prepare a private packet."""
+    review_path = args.agent_b_review or (root / "data" / "agent_b_reviews.json")
+    review_payload = read_json(review_path)
     with JobStore(_agent_database(args, root)) as store:
         job = store.job(args.job_id)
-        match = store.match(args.job_id)
-        if not job or not match:
-            raise ValueError(f"Job and score are required before Agent C can run: {args.job_id}")
-        finding = RecruiterAgent().inspect(job, fresh_days=args.fresh_days)
-        analysis = MatchAnalystAgent().analyze(
-            job,
-            match,
-            finding,
-            threshold=threshold,
-            fresh_days=args.fresh_days,
+        if not job:
+            raise ValueError(f"Stored job is required before Agent C can run: {args.job_id}")
+        _, already_applied = partition_previously_applied(
+            [job], root / "data" / "applied_jobs.json"
         )
-        if analysis.recommendation != "apply" and not args.allow_review:
-            raise ValueError(
-                f"Agent B recommendation is '{analysis.recommendation}', so Agent C stopped before drafting."
-            )
+        if already_applied:
+            raise ValueError("Agent C stopped because this role is already in the lifecycle exclusion registry.")
+        analysis_data, handoff = validate_agent_c_handoff(
+            review_payload,
+            job,
+            max_age_hours=args.handoff_max_age_hours,
+        )
+        analysis = MatchAnalysis.from_dict(analysis_data)
+        application_profile = load_application_profile(args.application_profile)
         draft = ApplicationAgent().prepare(
             job,
             analysis,
             application_profile,
             args.resume,
             root / "data" / "application_packets",
+            handoff=handoff,
         )
-        store.set_status(job.id, "saved", "Agent C prepared a packet; Paperclip board approval is required.")
+        target_state = "saved" if draft.status == "needs_information" else "ready_to_apply"
+        lifecycle_note = (
+            "Agent C packet is incomplete; reviewed answers are still required."
+            if target_state == "saved"
+            else "Agent C prepared a packet from a verified Agent B handoff; human approval is required."
+        )
+        _transition_application(
+            store,
+            root,
+            job,
+            target_state,
+            lifecycle_note,
+            actor="agent_c",
+            metadata={
+                "handoff_sha256": handoff["handoff_sha256"],
+                "packet_status": draft.status,
+            },
+        )
     print(f"Agent C packet status: {draft.status}. Packet: {draft.packet_path}")
     if draft.unresolved_questions:
         print("Missing reviewed answers: " + ", ".join(draft.unresolved_questions))
@@ -773,6 +1295,17 @@ def command_agent_c(args: argparse.Namespace, root: Path) -> int:
 
 def command_agent_c_browser(args: argparse.Namespace, root: Path) -> int:
     """Agent C: create a dry-run plan or execute an exactly approved browser task."""
+    with JobStore(_agent_database(args, root)) as store:
+        job = store.job(args.job_id)
+    if not job:
+        raise BrowserUseError("Agent C browser requires a stored job record.")
+    _, already_applied = partition_previously_applied(
+        [job], root / "data" / "applied_jobs.json"
+    )
+    if already_applied:
+        raise BrowserUseError(
+            "Agent C browser stopped because this role is already in the lifecycle exclusion registry."
+        )
     packet = args.packet or (root / "data" / "application_packets" / f"{args.job_id}.json")
     approval = args.approval_file or (
         root / "data" / "application_approvals" / f"{args.job_id}.json"
@@ -790,15 +1323,43 @@ def command_agent_c_browser(args: argparse.Namespace, root: Path) -> int:
         print(f"Approval receipt to review: {approval}")
         print("No browser opened and no application data was transmitted or submitted.")
         return 0
-    result = runner.execute(
-        approval,
-        requested_action,
-        model=args.model,
-        max_steps=args.max_steps,
-    )
+    runner.validate_execution(approval, requested_action)
+    with JobStore(_agent_database(args, root)) as store:
+        previous_state = str(store.application_state(args.job_id)["status"])
+        _transition_application(
+            store,
+            root,
+            job,
+            "applying",
+            "Approved Agent C browser session started.",
+            actor="agent_c",
+            metadata={"requested_action": requested_action},
+        )
+    try:
+        result = runner.execute(
+            approval,
+            requested_action,
+            model=args.model,
+            max_steps=args.max_steps,
+        )
+    except Exception:
+        with JobStore(_agent_database(args, root)) as store:
+            _transition_application(
+                store,
+                root,
+                job,
+                previous_state,
+                "Agent C browser session stopped before a verified employer receipt.",
+                actor="agent_c",
+                metadata={"requested_action": requested_action},
+            )
+        raise
     result_path = root / "data" / "application_results" / f"{args.job_id}.json"
     write_json(result_path, result)
-    print(f"Agent C browser run completed. Verify the site confirmation: {result_path}")
+    print(
+        "Agent C browser run completed. Lifecycle remains 'applying' until a human "
+        f"verifies the employer receipt: {result_path}"
+    )
     return 0
 
 
@@ -929,7 +1490,18 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("job_id")
     status.add_argument("state", choices=APPLICATION_STATES)
     status.add_argument("--notes", default="")
+    status.add_argument(
+        "--force",
+        action="store_true",
+        help="allow a reviewed correction that bypasses the normal lifecycle graph",
+    )
     status.set_defaults(handler=command_status)
+
+    applied_import = sub.add_parser(
+        "applied-import", help="merge reviewed company/title rows into applied exclusions"
+    )
+    applied_import.add_argument("input", type=Path)
+    applied_import.set_defaults(handler=command_applied_import)
 
     run = sub.add_parser("run", help="search, scrape, score, and report")
     run.add_argument("--max-jobs", type=int, default=30)
@@ -949,7 +1521,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     agent_a = sub.add_parser("agent-a", help="triage stored jobs like a recruiter")
     agent_a.add_argument("--job-id", action="append", default=[])
+    agent_a.add_argument("--location", action="append", default=None)
     agent_a.add_argument("--fresh-days", type=int, default=7)
+    agent_a.add_argument(
+        "--fresh-hours",
+        type=int,
+        help="strict freshness window; overrides --fresh-days when supplied",
+    )
     agent_a.add_argument(
         "--min-score",
         type=float,
@@ -964,8 +1542,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="discover recent roles through JobSpy, score them, and run Agent A triage",
     )
     agent_a_find.add_argument("--provider", choices=("jobspy",), default="jobspy")
-    agent_a_find.add_argument("--query", default="Recruiting Coordinator")
-    agent_a_find.add_argument("--location", default="United States")
+    agent_a_find.add_argument(
+        "--query",
+        default=('"Recruiting Coordinator" OR "Recruiting Operations Coordinator" OR '
+                 '"Talent Acquisition Coordinator" OR "Talent Operations Coordinator" OR '
+                 '"Talent Coordinator" OR "Candidate Experience Coordinator" OR '
+                 '"Sourcing Coordinator" OR "Junior Recruiter" OR "Recruiter I" OR '
+                 '"Associate Recruiter" OR "Recruiting Associate" OR '
+                 '"Talent Acquisition Associate" OR "Talent Acquisition Specialist" OR '
+                 '"University Recruiter"'),
+    )
+    agent_a_find.add_argument(
+        "--location",
+        action="append",
+        default=None,
+        help=(
+            "repeat for multiple cities; all locations share one deduplication, "
+            "verification, exclusion, scoring, and report pass"
+        ),
+    )
     agent_a_find.add_argument("--country", default="USA")
     agent_a_find.add_argument(
         "--glassdoor-location",
@@ -976,6 +1571,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     agent_a_find.add_argument("--hours-old", type=int, default=168)
     agent_a_find.add_argument("--results-wanted", type=int, default=10)
+    agent_a_find.add_argument(
+        "--max-results",
+        type=int,
+        default=10,
+        help="final current-run shortlist size; hard-capped at 10",
+    )
     agent_a_find.add_argument(
         "--concurrency",
         type=int,
@@ -1014,7 +1615,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     agent_b = sub.add_parser("agent-b", help="independently verify fit and explain the decision")
     agent_b.add_argument("--job-id", action="append", default=[])
-    agent_b.add_argument("--fresh-days", type=int, default=7)
+    agent_b.add_argument(
+        "--location",
+        action="append",
+        default=None,
+        help="repeat exact requested locations; defaults to the latest Agent A search scope",
+    )
+    agent_b.add_argument(
+        "--fresh-days",
+        type=int,
+        help="calendar-day window; defaults to Agent A's exact hours-old scope",
+    )
+    agent_b.add_argument(
+        "--fresh-hours",
+        type=int,
+        help="strict freshness window; defaults to Agent A's exact hours-old scope",
+    )
     agent_b.add_argument("--min-score", type=float)
     agent_b.add_argument("--database", type=Path)
     agent_b.add_argument("--output", type=Path)
@@ -1041,12 +1657,17 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=project_root() / "data" / "application_profile.json",
     )
-    agent_c.add_argument("--fresh-days", type=int, default=7)
     agent_c.add_argument("--database", type=Path)
     agent_c.add_argument(
-        "--allow-review",
-        action="store_true",
-        help="draft even when Agent B requires manual freshness review",
+        "--agent-b-review",
+        type=Path,
+        help="Agent B review file; defaults to data/agent_b_reviews.json",
+    )
+    agent_c.add_argument(
+        "--handoff-max-age-hours",
+        type=int,
+        default=24,
+        help="maximum age of the integrity-bound Agent B live review",
     )
     agent_c.set_defaults(handler=command_agent_c)
 

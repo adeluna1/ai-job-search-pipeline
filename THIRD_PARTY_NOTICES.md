@@ -23,3 +23,21 @@ The specialist adapters integrate with these separately installed or separately 
 - browser-use `0.13.6`: https://github.com/browser-use/browser-use (MIT License). Reference commit `2be09b6c5eb702a9287684b42b27e7042a1aba29`. Installed only under ignored `tools/browser-use-runtime/`.
 
 JobSpy and browser-use use different isolated runtimes because their current `markdownify` constraints are incompatible. The repository does not copy code from LinkedIn auto-apply repositories. Such projects were reviewed only for common field categories; this project implements its own truthful field catalog, does not include anti-detection behavior, and routes unknown questions to a human.
+
+The optional local code-quality layer uses:
+
+- Code Review Graph `2.3.7`: https://github.com/tirth8205/code-review-graph (MIT License). It is installed only under ignored `tools/code-review-graph-runtime/`; graph state remains under ignored `.code-review-graph/`. The repository invokes the upstream GitHub Action by its `v2.3.7` release tag and does not vendor its package contents.
+
+The posting-intelligence layer selectively adapts deterministic ideas from:
+
+- Career Ops `1.25.0`: https://github.com/santifer/career-ops (MIT License). Reference commit `7590b7488a97f4aba182b48fd9fb5875c039ac75`. The adapted concepts are local SimHash description fingerprints, URL/provenance trust flags, repost/cross-listing evidence, and stronger filled/closed-posting detection. The Career Ops runtime, prompts, trackers, application workflow, and AI scoring system are not embedded or executed. Its copyright and license are preserved in `docs/licenses/CAREER_OPS_LICENSE.txt`.
+
+The optional desktop interface and packaging layer selectively adapt files from:
+
+- Expedient Employment v1.4.0: https://github.com/BarnsL/expedient-employment
+  (MIT License). Reference tag commit
+  edbdc6622b7e9ddd8413beff0a537329f6959d72. Only Electron renderer, preload,
+  packaging, and installer patterns were imported and then hardened. Its Python
+  pipeline, search defaults, scoring logic, and automated alternatives were not
+  imported. The upstream license is preserved in
+  docs/licenses/EXPEDIENT_EMPLOYMENT_LICENSE.txt.

@@ -1,0 +1,22 @@
+# Local secrets and credentials
+/.env
+/.env.*
+
+# Private job-search artifacts and generated output
+/data/**
+/reports/**
+/logs/**
+*.docx
+*.xlsx
+*.xls
+*.pdf
+
+# Local runtimes, authenticated browser state, and dependencies
+/.paperclip-runtime/**
+/tools/**
+/node_modules/**
+
+# Generated graph state and language caches
+/.code-review-graph/**
+**/__pycache__/**
+**/.pytest_cache/**

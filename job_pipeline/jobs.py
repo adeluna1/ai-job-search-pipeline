@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 import json
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 from urllib.parse import urlsplit
@@ -190,6 +191,18 @@ def infer_required_years(description: str) -> float | None:
     return min(years) if years else None
 
 
+def _normalize_liveness_text(value: str) -> str:
+    """Normalize punctuation and accents before matching closure banners."""
+    value = str(value or "").replace("’", "'").replace("‘", "'")
+    value = value.replace("“", '"').replace("”", '"')
+    value = "".join(
+        character
+        for character in unicodedata.normalize("NFD", value)
+        if unicodedata.category(character) != "Mn"
+    )
+    return normalize_space(value).casefold()
+
+
 def validate_job(job: Job) -> tuple[bool, str]:
     """Reject empty shells, generic career indexes, and expired/redirected job pages."""
     if len(job.description) < 180:
@@ -200,18 +213,51 @@ def validate_job(job: Job) -> tuple[bool, str]:
         return False, f"generic page title: {job.title}"
     if any(marker in normalized_title for marker in ("job expired", "position filled", "no longer available")):
         return False, "page title states that the role is closed"
-    description = job.description.casefold()
+    description = _normalize_liveness_text(job.description)
+    bot_challenges = (
+        "just a moment",
+        "performing security verification",
+        "checking your browser before",
+        "verify you are human",
+        "verify you are not a human",
+        "enable javascript and cookies to continue",
+        "please complete the security check",
+    )
+    if any(marker in description[:1200] for marker in bot_challenges):
+        return False, "page is an access challenge, so posting liveness is uncertain"
     closed_markers = (
         "this job is no longer available",
         "this position is no longer available",
+        "this role is no longer available",
+        "job is no longer open",
+        "job no longer open",
         "this job has expired",
+        "this job listing is closed",
+        "this job is closed",
         "this position has been filled",
         "job posting has expired",
         "no longer accepting applications",
+        "applications have closed",
+        "applications are closed",
+        "applications closed",
         "the job you are looking for is no longer",
+        "job not found",
+        "job listing not found",
+        "the job you requested was not found",
+        "the job posting you're looking for might have closed",
+        "it has been removed",
+        "couldn't find anything here",
+        "404 error",
     )
     if any(marker in description[:2500] for marker in closed_markers):
         return False, "page states that the role is closed or no longer accepting applications"
+    filled = re.search(
+        r"\b(?:job|position|role|posting|opening|vacancy|requisition|req|listing)\b"
+        r".{0,60}?\bhas been filled\b(?!\s+out)",
+        description[:2500],
+    )
+    if filled and not re.search(r"\b(?:application|form)\s+has been filled", filled.group(0)):
+        return False, "page states that the role has been filled"
     markers = (
         "responsibilities",
         "qualifications",

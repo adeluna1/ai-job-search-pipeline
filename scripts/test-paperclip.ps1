@@ -53,11 +53,20 @@ foreach ($name in $expectedAgents) {
     if (-not ($extraArgs -contains '--sandbox' -and $extraArgs -contains 'workspace-write')) {
         throw "$name is missing the workspace-write sandbox arguments."
     }
+    if (-not ($extraArgs -contains '-c' -and $extraArgs -contains 'windows.sandbox="unelevated"')) {
+        throw "$name is missing the unattended Windows sandbox fallback."
+    }
+    if (-not ($extraArgs -contains 'sandbox_workspace_write.network_access=true')) {
+        throw "$name is missing network access required by the job-search providers."
+    }
+    if (-not ($extraArgs -contains '--add-dir' -and $extraArgs -contains $script:ProjectRoot)) {
+        throw "$name is missing the exact project writable directory required for pipeline artifacts."
+    }
     $agentChecks += [ordered]@{
         name = $name
         id = $agent.id
         status = $agent.status
-        sandbox = 'workspace-write'
+        sandbox = 'workspace-write (Windows unelevated)'
         bypass = $false
     }
 }

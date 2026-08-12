@@ -41,6 +41,24 @@ def _card(record: dict[str, Any]) -> str:
     if record.get("ai_score") is not None:
         ai_line = f'<p class="ai">AI score: {_e(record["ai_score"])}. {_e(record.get("ai_reason"))}</p>'
     salary = f'<span class="meta">{_e(record["salary"])}</span>' if record.get("salary") else ""
+    intelligence = record.get("posting_intelligence", {}) or {}
+    trust = intelligence.get("trust", {}) or {}
+    repost = intelligence.get("repost", {}) or {}
+    cross_listings = intelligence.get("cross_listings", []) or []
+    intelligence_line = ""
+    if trust:
+        signals = list(trust.get("flags", []))
+        if repost.get("detected"):
+            signals.append(f"reposted {repost.get('appearance_count', 2)} times")
+        if cross_listings:
+            signals.append(f"{len(cross_listings)} near-duplicate cross-listing(s)")
+        signal_text = ", ".join(signals) if signals else "No deterministic concern detected."
+        intelligence_line = (
+            f'<p class="intelligence"><strong>Posting confidence: '
+            f'{_e(str(trust.get("level", "unknown")).title())} '
+            f'({_e(trust.get("score", ""))}/100)</strong> — {_e(signal_text)} '
+            f'<span>Advisory only; resume score unchanged.</span></p>'
+        )
     return f"""
     <article class="job-card {score_class}" data-score="{score:.1f}" data-fit="{_e(record['fit_label'])}" data-status="{_e(record.get('status', 'new'))}" data-mode="{_e(record.get('work_mode', 'unknown'))}">
       <div class="card-head">
@@ -53,6 +71,7 @@ def _card(record: dict[str, Any]) -> str:
       </div>
       <p class="recommendation">{_e(record['recommendation'])}</p>
       {ai_line}
+      {intelligence_line}
       <div class="components">{component_rows}</div>
       <div class="detail-grid">
         <section><h3>Matched evidence</h3><div class="chips">{_chips(record.get('matched_skills', [])[:10])}</div><ul>{_list_items(record.get('matched_evidence', []), 'No resume evidence mapped automatically.')}</ul></section>
@@ -85,10 +104,10 @@ def export_html(
 <title>{_e(title)}</title>
 <style>
 :root{{--ink:#17212b;--muted:#647184;--paper:#f3f6f8;--card:#fff;--navy:#15324a;--teal:#168478;--gold:#cc8b19;--red:#b64c4c;--line:#dce4e8}}
-*{{box-sizing:border-box}}body{{margin:0;background:var(--paper);color:var(--ink);font:15px/1.55 Inter,Segoe UI,Arial,sans-serif}}a{{color:inherit}}.shell{{max-width:1120px;margin:auto;padding:44px 24px 70px}}header.hero{{background:linear-gradient(130deg,var(--navy),#1c5361);color:#fff;border-radius:22px;padding:34px;box-shadow:0 18px 50px #15324a22}}.hero h1{{margin:0 0 8px;font-size:clamp(30px,5vw,50px);line-height:1.05}}.hero p{{margin:0;max-width:760px;color:#d9e8ec}}.stats{{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:26px}}.stat{{background:#ffffff14;border:1px solid #ffffff22;border-radius:13px;padding:15px}}.stat strong{{display:block;font-size:27px}}.toolbar{{position:sticky;top:0;z-index:4;margin:22px 0;padding:13px;background:#f3f6f8ee;backdrop-filter:blur(10px);display:flex;gap:10px;flex-wrap:wrap}}input,select{{border:1px solid var(--line);background:#fff;border-radius:10px;padding:11px 12px;font:inherit}}input{{flex:1;min-width:220px}}.job-card{{background:var(--card);border:1px solid var(--line);border-left:6px solid var(--muted);border-radius:16px;padding:24px;margin:15px 0;box-shadow:0 8px 28px #1836420c}}.job-card.great{{border-left-color:var(--teal)}}.job-card.strong{{border-left-color:#3b8fbb}}.job-card.possible{{border-left-color:var(--gold)}}.job-card.weak{{border-left-color:var(--red)}}.card-head{{display:flex;justify-content:space-between;gap:20px}}h2{{margin:2px 0 8px;font-size:24px;line-height:1.18}}h2 a{{text-decoration:none}}h2 a:hover{{text-decoration:underline}}.eyebrow{{text-transform:uppercase;letter-spacing:.11em;color:var(--muted);font-weight:700;font-size:12px;margin:0}}.score{{min-width:88px;text-align:center;background:var(--paper);border-radius:13px;padding:10px}}.score strong{{display:block;font-size:31px;line-height:1}}.score span{{font-size:12px;text-transform:uppercase;color:var(--muted)}}.meta-row,.chips{{display:flex;gap:7px;flex-wrap:wrap}}.meta,.chip{{background:#edf2f4;border-radius:999px;padding:4px 9px;font-size:12px}}.chip{{background:#e3f3ef;color:#105e56}}.recommendation{{font-weight:700;color:var(--navy)}}.ai{{border-left:3px solid #8a63bb;padding-left:10px;color:#564367}}.components{{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin:17px 0}}.components div{{background:var(--paper);padding:8px;border-radius:8px;display:flex;justify-content:space-between}}.detail-grid{{display:grid;grid-template-columns:1.2fr 1fr;gap:25px}}h3{{font-size:13px;text-transform:uppercase;letter-spacing:.08em;margin:12px 0 8px;color:var(--muted)}}ul{{padding-left:20px}}footer{{border-top:1px solid var(--line);padding-top:12px;margin-top:16px;display:flex;gap:14px;flex-wrap:wrap;color:var(--muted);font-size:12px}}.empty{{padding:40px;text-align:center}}@media(max-width:720px){{.stats,.components,.detail-grid{{grid-template-columns:1fr}}.card-head{{align-items:flex-start}}}}
+*{{box-sizing:border-box}}body{{margin:0;background:var(--paper);color:var(--ink);font:15px/1.55 Inter,Segoe UI,Arial,sans-serif}}a{{color:inherit}}.shell{{max-width:1120px;margin:auto;padding:44px 24px 70px}}header.hero{{background:linear-gradient(130deg,var(--navy),#1c5361);color:#fff;border-radius:22px;padding:34px;box-shadow:0 18px 50px #15324a22}}.hero h1{{margin:0 0 8px;font-size:clamp(30px,5vw,50px);line-height:1.05}}.hero p{{margin:0;max-width:760px;color:#d9e8ec}}.stats{{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:26px}}.stat{{background:#ffffff14;border:1px solid #ffffff22;border-radius:13px;padding:15px}}.stat strong{{display:block;font-size:27px}}.toolbar{{position:sticky;top:0;z-index:4;margin:22px 0;padding:13px;background:#f3f6f8ee;backdrop-filter:blur(10px);display:flex;gap:10px;flex-wrap:wrap}}input,select{{border:1px solid var(--line);background:#fff;border-radius:10px;padding:11px 12px;font:inherit}}input{{flex:1;min-width:220px}}.job-card{{background:var(--card);border:1px solid var(--line);border-left:6px solid var(--muted);border-radius:16px;padding:24px;margin:15px 0;box-shadow:0 8px 28px #1836420c}}.job-card.great{{border-left-color:var(--teal)}}.job-card.strong{{border-left-color:#3b8fbb}}.job-card.possible{{border-left-color:var(--gold)}}.job-card.weak{{border-left-color:var(--red)}}.card-head{{display:flex;justify-content:space-between;gap:20px}}h2{{margin:2px 0 8px;font-size:24px;line-height:1.18}}h2 a{{text-decoration:none}}h2 a:hover{{text-decoration:underline}}.eyebrow{{text-transform:uppercase;letter-spacing:.11em;color:var(--muted);font-weight:700;font-size:12px;margin:0}}.score{{min-width:88px;text-align:center;background:var(--paper);border-radius:13px;padding:10px}}.score strong{{display:block;font-size:31px;line-height:1}}.score span{{font-size:12px;text-transform:uppercase;color:var(--muted)}}.meta-row,.chips{{display:flex;gap:7px;flex-wrap:wrap}}.meta,.chip{{background:#edf2f4;border-radius:999px;padding:4px 9px;font-size:12px}}.chip{{background:#e3f3ef;color:#105e56}}.recommendation{{font-weight:700;color:var(--navy)}}.ai{{border-left:3px solid #8a63bb;padding-left:10px;color:#564367}}.intelligence{{background:#fff8e8;border:1px solid #ecd9a6;border-radius:10px;padding:10px 12px;color:#654d17}}.intelligence span{{display:block;color:var(--muted);font-size:12px}}.components{{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin:17px 0}}.components div{{background:var(--paper);padding:8px;border-radius:8px;display:flex;justify-content:space-between}}.detail-grid{{display:grid;grid-template-columns:1.2fr 1fr;gap:25px}}h3{{font-size:13px;text-transform:uppercase;letter-spacing:.08em;margin:12px 0 8px;color:var(--muted)}}ul{{padding-left:20px}}footer{{border-top:1px solid var(--line);padding-top:12px;margin-top:16px;display:flex;gap:14px;flex-wrap:wrap;color:var(--muted);font-size:12px}}.empty{{padding:40px;text-align:center}}@media(max-width:720px){{.stats,.components,.detail-grid{{grid-template-columns:1fr}}.card-head{{align-items:flex-start}}}}
 </style></head><body><main class="shell">
 <header class="hero"><h1>{_e(title)}</h1><p>{_e(subtitle)}</p><div class="stats"><div class="stat"><strong>{len(records)}</strong>ranked jobs</div><div class="stat"><strong>{strong_count}</strong>strong fits (&ge; {threshold:g})</div><div class="stat"><strong>{companies}</strong>companies</div></div></header>
-<div class="toolbar"><input id="search" type="search" placeholder="Filter title, company, or location"><select id="fit"><option value="">All fit levels</option><option>excellent</option><option>strong</option><option>possible</option><option>weak</option></select><select id="mode"><option value="">All work modes</option><option>remote</option><option>hybrid</option><option>onsite</option><option>unknown</option></select><select id="status"><option value="">All statuses</option><option>new</option><option>saved</option><option>applied</option><option>interviewing</option><option>offer</option><option>rejected</option><option>withdrawn</option></select></div>
+<div class="toolbar"><input id="search" type="search" placeholder="Filter title, company, or location"><select id="fit"><option value="">All fit levels</option><option>excellent</option><option>strong</option><option>possible</option><option>weak</option></select><select id="mode"><option value="">All work modes</option><option>remote</option><option>hybrid</option><option>onsite</option><option>unknown</option></select><select id="status"><option value="">All statuses</option><option>new</option><option>saved</option><option>ready_to_apply</option><option>applying</option><option>applied</option><option>interviewing</option><option>offer</option><option>accepted</option><option>declined</option><option>rejected</option><option>withdrawn</option><option>closed</option></select></div>
 <section id="cards">{cards or '<p class="empty">No scored jobs meet this report cutoff.</p>'}</section>
 <p class="generated">Generated {_e(generated)}. Scores are decision support, not hiring guarantees.</p>
 </main><script>
@@ -106,6 +125,8 @@ def export_csv(records: list[dict[str, Any]], path: Path) -> None:
         "id", "final_score", "deterministic_score", "ai_score", "fit_label", "status",
         "title", "company", "location", "work_mode", "posted_date", "salary", "url",
         "matched_skills", "gaps", "recommendation", "notes",
+        "posting_trust_score", "posting_trust_level", "posting_flags",
+        "repost_appearances", "cross_listing_count",
     ]
     with path.open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
@@ -114,6 +135,16 @@ def export_csv(records: list[dict[str, Any]], path: Path) -> None:
             row = {field: record.get(field, "") for field in fields}
             row["matched_skills"] = "; ".join(record.get("matched_skills", []))
             row["gaps"] = "; ".join(record.get("gaps", []))
+            intelligence = record.get("posting_intelligence", {}) or {}
+            trust = intelligence.get("trust", {}) or {}
+            repost = intelligence.get("repost", {}) or {}
+            row["posting_trust_score"] = trust.get("score", "")
+            row["posting_trust_level"] = trust.get("level", "")
+            row["posting_flags"] = "; ".join(trust.get("flags", []))
+            row["repost_appearances"] = (
+                repost.get("appearance_count", "") if repost.get("detected") else ""
+            )
+            row["cross_listing_count"] = len(intelligence.get("cross_listings", []) or [])
             writer.writerow(row)
 
 

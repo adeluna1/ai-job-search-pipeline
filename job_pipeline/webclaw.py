@@ -7,6 +7,8 @@ import logging
 import os
 import shutil
 import subprocess
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -115,6 +117,45 @@ class WebClawClient:
         if not isinstance(payload, dict):
             raise WebClawError(f"Scrape returned an unexpected JSON shape for {url}.")
         return payload
+
+    def probe(self, url: str, max_bytes: int = 524_288) -> dict[str, Any]:
+        """Fetch a job URL without cache and expose its final redirect target.
+
+        Search indexes and extraction caches can retain a full job description after
+        the employer closes the requisition. This lightweight second channel makes
+        redirect-to-index and explicit expiry responses visible to the verifier.
+        """
+        request = urllib.request.Request(
+            url,
+            headers={
+                "Accept": "text/html,application/xhtml+xml",
+                "Cache-Control": "no-cache, no-store",
+                "Pragma": "no-cache",
+                "User-Agent": "Mozilla/5.0 (compatible; AIJobSearchPipeline/1.0)",
+            },
+            method="GET",
+        )
+        limit = max(1, min(int(max_bytes), 1_048_576))
+        try:
+            with urllib.request.urlopen(request, timeout=min(self.timeout, 30)) as response:
+                body = response.read(limit)
+                return {
+                    "requested_url": url,
+                    "final_url": response.geturl(),
+                    "status": int(getattr(response, "status", 200)),
+                    "content_type": str(response.headers.get("Content-Type", "")),
+                    "body": body.decode("utf-8", errors="replace"),
+                }
+        except urllib.error.HTTPError as exc:
+            return {
+                "requested_url": url,
+                "final_url": exc.geturl(),
+                "status": int(exc.code),
+                "content_type": str(exc.headers.get("Content-Type", "")),
+                "body": exc.read(limit).decode("utf-8", errors="replace"),
+            }
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise WebClawError(f"Fresh application probe failed for {url}: {exc}") from exc
 
     def extract_json_from_text(
         self,

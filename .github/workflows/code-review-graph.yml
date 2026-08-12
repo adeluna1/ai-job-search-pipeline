@@ -1,0 +1,29 @@
+name: Code Review Graph
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+      - name: Run local-first graph review and comment
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        uses: tirth8205/code-review-graph@v2.3.7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          comment: "true"
+          fail-on-risk: none
+      - name: Run local-first graph review for a fork
+        if: github.event.pull_request.head.repo.full_name != github.repository
+        uses: tirth8205/code-review-graph@v2.3.7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          comment: "false"
+          fail-on-risk: none

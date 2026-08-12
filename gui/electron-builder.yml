@@ -1,0 +1,74 @@
+# electron-builder configuration for the AI Job Search Pipeline desktop.
+# Driven by packaging/build-windows.ps1 (Windows) and packaging/build-posix.sh (macOS/Linux).
+# Paths are relative to this file's directory (the gui/ project directory).
+
+appId: com.albertdeluna.aijobsearch
+productName: AI Job Search Pipeline
+copyright: Copyright 2026 AI Job Search Pipeline contributors
+
+directories:
+  output: release
+
+files:
+  - dist/**
+  - electron/**
+  - package.json
+
+# Bundle the job-hunting pipeline itself into the packaged app so the GUI can
+# run doctor/search/report flows without a separate source checkout.
+# Local user config (*.local.json) and runtime data are intentionally excluded.
+extraResources:
+  - from: ../job_pipeline
+    to: pipeline/job_pipeline
+    filter:
+      - "**/*"
+      - "!**/__pycache__/**"
+  - from: ../run.ps1
+    to: pipeline/run.ps1
+  - from: ../pyproject.toml
+    to: pipeline/pyproject.toml
+  - from: ../run.cmd
+    to: pipeline/run.cmd
+  - from: ../scripts
+    to: pipeline/scripts
+    filter:
+      - "**/*"
+  - from: ../config
+    to: pipeline/config
+    filter:
+      - "*.json"
+      - "!*.local.json"
+  - from: ../docs
+    to: pipeline/docs
+    filter:
+      - "**/*"
+  - from: ../README.md
+    to: pipeline/README.md
+  - from: ../LICENSE
+    to: pipeline/LICENSE
+  - from: ../THIRD_PARTY_NOTICES.md
+    to: pipeline/THIRD_PARTY_NOTICES.md
+
+# Windows: portable zip plus an unpacked dir that installer/windows.iss turns
+# into the Inno Setup installer. No NSIS target on purpose.
+win:
+  artifactName: AIJobSearchPipeline-${version}-${arch}.${ext}
+  target:
+    - zip
+    - dir
+  icon: build/icon.png
+
+# Linux: AppImage (build on Linux).
+linux:
+  target:
+    - AppImage
+  icon: build/icon.png
+  category: Utility
+
+# macOS: dmg + zip (must be built on macOS).
+mac:
+  target:
+    - dmg
+    - zip
+  icon: build/icon.png
+  category: public.app-category.productivity

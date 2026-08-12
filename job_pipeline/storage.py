@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .jobs import Job
+from .lifecycle import validate_transition
 from .matching import MatchResult
 from .util import utc_now
 
@@ -60,6 +61,20 @@ CREATE TABLE IF NOT EXISTS applications (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS application_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    from_status TEXT,
+    to_status TEXT NOT NULL,
+    notes TEXT NOT NULL DEFAULT '',
+    actor TEXT NOT NULL DEFAULT 'system',
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_application_events_job_created
+ON application_events(job_id, created_at);
+
 CREATE TABLE IF NOT EXISTS runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     action TEXT NOT NULL,
@@ -82,6 +97,22 @@ class JobStore:
         self.connection = sqlite3.connect(path)
         self.connection.row_factory = sqlite3.Row
         self.connection.executescript(SCHEMA)
+        # Existing databases predate the event table. Record their current
+        # state as a migration baseline without inventing earlier transitions.
+        self.connection.execute(
+            """
+            INSERT INTO application_events(
+                job_id, from_status, to_status, notes, actor, metadata_json, created_at
+            )
+            SELECT a.job_id, NULL, a.status, 'Lifecycle tracking enabled',
+                   'migration', '{}', a.updated_at
+            FROM applications a
+            WHERE NOT EXISTS (
+                SELECT 1 FROM application_events e WHERE e.job_id = a.job_id
+            )
+            """
+        )
+        self.connection.commit()
 
     def close(self) -> None:
         """Commit pending changes and close the connection."""
@@ -164,10 +195,19 @@ class JobStore:
                 utc_now(),
             ),
         )
-        self.connection.execute(
+        application_cursor = self.connection.execute(
             "INSERT OR IGNORE INTO applications(job_id, status, notes, updated_at) VALUES (?, 'new', '', ?)",
             (job.id, utc_now()),
         )
+        if application_cursor.rowcount:
+            self.connection.execute(
+                """
+                INSERT INTO application_events(
+                    job_id, from_status, to_status, notes, actor, metadata_json, created_at
+                ) VALUES (?, NULL, 'new', 'Job discovered', 'agent_a', '{}', ?)
+                """,
+                (job.id, utc_now()),
+            )
         self.connection.commit()
 
     def upsert_match(self, match: MatchResult) -> None:
@@ -289,28 +329,85 @@ class JobStore:
             record = dict(row)
             for source, target in json_fields.items():
                 record[target] = json.loads(record.pop(source))
-            record.pop("raw_json", None)
+            raw = json.loads(record.pop("raw_json", "{}"))
+            record["posting_intelligence"] = (
+                raw.get("posting_intelligence", {}) if isinstance(raw, dict) else {}
+            )
             record.pop("required_skills_json", None)
             record.pop("preferred_skills_json", None)
             record.pop("responsibilities_json", None)
             output.append(record)
         return output
 
-    def set_status(self, job_id: str, status: str, notes: str = "") -> bool:
-        """Update a tracked application state and return whether the job exists."""
-        exists = self.connection.execute("SELECT 1 FROM jobs WHERE id=?", (job_id,)).fetchone()
-        if not exists:
+    def set_status(
+        self,
+        job_id: str,
+        status: str,
+        notes: str = "",
+        *,
+        actor: str = "manual",
+        metadata: dict[str, Any] | None = None,
+        force: bool = False,
+        commit: bool = True,
+    ) -> bool:
+        """Transition one application and append an immutable lifecycle event."""
+        row = self.connection.execute(
+            "SELECT status FROM applications WHERE job_id=?", (job_id,)
+        ).fetchone()
+        if not row:
             return False
+        previous = str(row["status"])
+        validate_transition(previous, status, force=force)
+        changed_at = utc_now()
         self.connection.execute(
             """
-            INSERT INTO applications(job_id, status, notes, updated_at) VALUES (?, ?, ?, ?)
-            ON CONFLICT(job_id) DO UPDATE SET
-                status=excluded.status, notes=excluded.notes, updated_at=excluded.updated_at
+            UPDATE applications SET status=?, notes=?, updated_at=? WHERE job_id=?
             """,
-            (job_id, status, notes, utc_now()),
+            (status, notes, changed_at, job_id),
         )
-        self.connection.commit()
+        self.connection.execute(
+            """
+            INSERT INTO application_events(
+                job_id, from_status, to_status, notes, actor, metadata_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                job_id,
+                previous,
+                status,
+                notes,
+                actor,
+                json.dumps(metadata or {}, ensure_ascii=False, sort_keys=True),
+                changed_at,
+            ),
+        )
+        if commit:
+            self.connection.commit()
         return True
+
+    def application_state(self, job_id: str) -> dict[str, Any] | None:
+        """Return the current lifecycle state for one job."""
+        row = self.connection.execute(
+            "SELECT job_id, status, notes, updated_at FROM applications WHERE job_id=?",
+            (job_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def application_events(self, job_id: str) -> list[dict[str, Any]]:
+        """Return the immutable lifecycle audit trail in creation order."""
+        rows = self.connection.execute(
+            """
+            SELECT id, job_id, from_status, to_status, notes, actor, metadata_json, created_at
+            FROM application_events WHERE job_id=? ORDER BY id
+            """,
+            (job_id,),
+        ).fetchall()
+        output: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["metadata"] = json.loads(item.pop("metadata_json") or "{}")
+            output.append(item)
+        return output
 
     def count_jobs(self) -> int:
         """Return the current number of unique job URLs."""

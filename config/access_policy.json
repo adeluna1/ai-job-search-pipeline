@@ -1,0 +1,34 @@
+{
+  "webclaw": {
+    "allowed_hosts": "any"
+  },
+  "session_sites": {
+    "linkedin": {
+      "domains": ["linkedin.com"],
+      "login_url": "https://www.linkedin.com/login"
+    },
+    "glassdoor": {
+      "domains": ["glassdoor.com"],
+      "login_url": "https://www.glassdoor.com/profile/login_input.htm"
+    },
+    "zip_recruiter": {
+      "domains": ["ziprecruiter.com"],
+      "login_url": "https://www.ziprecruiter.com/login"
+    },
+    "indeed": {
+      "domains": ["indeed.com"],
+      "login_url": "https://secure.indeed.com/auth"
+    }
+  },
+  "access_guard": {
+    "detect_status": [400, 401, 403, 429],
+    "human_check_markers": [
+      "captcha",
+      "are you a robot",
+      "unusual traffic",
+      "verify you are human",
+      "security check"
+    ],
+    "action": "route_to_session_browser"
+  }
+}

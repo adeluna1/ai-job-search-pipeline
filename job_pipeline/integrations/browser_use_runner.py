@@ -84,6 +84,7 @@ class BrowserApplicationPlan:
     allowed_domain: str
     requested_action: str
     approval_status: str
+    blockers: list[str]
     created_at: str
 
     def to_dict(self) -> dict[str, Any]:
@@ -173,10 +174,37 @@ class BrowserUseRunner:
                 raise BrowserUseError("Application approval has expired.")
         return receipt
 
+    def packet_blockers(self, requested_action: str) -> list[str]:
+        """Return packet-level reasons the requested browser action cannot run."""
+        if requested_action not in self.valid_actions:
+            return [f"Unsupported browser action: {requested_action}"]
+        unresolved = [
+            str(value) for value in self.packet.get("unresolved_questions", []) if str(value)
+        ]
+        if requested_action == "fill_and_submit" and unresolved:
+            return [
+                "Submission is blocked while unresolved application questions remain: "
+                + ", ".join(unresolved)
+            ]
+        return []
+
+    def validate_execution(self, approval_path: Path, requested_action: str) -> dict[str, Any]:
+        """Validate packet readiness, exact approval, and the local resume before state changes."""
+        blockers = self.packet_blockers(requested_action)
+        if blockers:
+            raise BrowserUseError(blockers[0])
+        receipt = self._validate_approval(approval_path, requested_action)
+        candidate = self.packet.get("candidate", {})
+        resume_path = Path(str(candidate.get("resume_path") or ""))
+        if not resume_path.exists():
+            raise BrowserUseError("The approved packet's resume file is unavailable.")
+        return receipt
+
     def plan(self, requested_action: str, approval_path: Path | None = None) -> BrowserApplicationPlan:
         """Build a public-safe plan; a missing receipt remains explicitly pending."""
-        status = "pending"
-        if approval_path and approval_path.exists():
+        blockers = self.packet_blockers(requested_action)
+        status = "blocked" if blockers else "pending"
+        if not blockers and approval_path and approval_path.exists():
             receipt = read_json(approval_path)
             if receipt.get("decision") == "pending":
                 status = "pending"
@@ -194,6 +222,7 @@ class BrowserUseRunner:
             allowed_domain=self.allowed_domain,
             requested_action=requested_action,
             approval_status=status,
+            blockers=blockers,
             created_at=utc_now(),
         )
 
@@ -232,11 +261,9 @@ Return a concise list of fields filled, unresolved questions, the final URL, and
         max_steps: int = 40,
     ) -> dict[str, Any]:
         """Run browser-use only after exact packet/action approval is validated."""
-        self._validate_approval(approval_path, requested_action)
+        self.validate_execution(approval_path, requested_action)
         candidate = self.packet.get("candidate", {})
         resume_path = Path(str(candidate.get("resume_path") or ""))
-        if not resume_path.exists():
-            raise BrowserUseError("The approved packet's resume file is unavailable.")
         try:
             from browser_use import Agent, BrowserProfile, ChatOpenAI, Tools
         except ImportError as exc:

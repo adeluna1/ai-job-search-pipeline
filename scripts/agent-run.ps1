@@ -8,6 +8,14 @@ $ProjectRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Pa
 if ($PipelineArgs.Count -eq 0) {
     throw 'Provide a pipeline command.'
 }
+
+if (
+    $PipelineArgs[0] -eq 'agent-a-find' -and
+    $PipelineArgs -notcontains '--no-agent-web-browser'
+) {
+    & (Join-Path $ProjectRoot 'scripts\start-agent-web-browser.ps1')
+}
+
 $RuntimeName = switch ($PipelineArgs[0]) {
     'agent-a-find' { 'jobspy-runtime' }
     'agent-c-browser' { 'browser-use-runtime' }
