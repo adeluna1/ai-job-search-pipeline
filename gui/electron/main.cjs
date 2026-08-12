@@ -33,8 +33,31 @@ if (!gotLock) {
   });
 }
 
+function isPipelineRoot(candidate) {
+  if (!candidate) return false;
+  const resolved = path.resolve(candidate);
+  return (
+    fs.existsSync(path.join(resolved, 'run.ps1'))
+    && fs.existsSync(path.join(resolved, 'job_pipeline'))
+    && fs.existsSync(path.join(resolved, 'config', 'profile.json'))
+  );
+}
+
+function findWorkspacePipelineRoot() {
+  const candidates = [
+    process.env.AI_JOB_PIPELINE_ROOT,
+    path.resolve(path.dirname(process.execPath), '..', '..', '..'),
+  ].filter(Boolean);
+  return candidates.find((candidate) => (
+    isPipelineRoot(candidate)
+    && fs.existsSync(path.join(path.resolve(candidate), 'data', 'applied_jobs.json'))
+  )) || '';
+}
+
 function preparePipelineRoot() {
   if (!app.isPackaged) return DEVELOPMENT_PIPELINE_ROOT;
+  const workspace = findWorkspacePipelineRoot();
+  if (workspace) return path.resolve(workspace);
   const bundled = path.join(process.resourcesPath, 'pipeline');
   const runtime = path.join(app.getPath('userData'), 'pipeline');
   fs.mkdirSync(runtime, { recursive: true });
@@ -505,6 +528,54 @@ ipcMain.handle('report:open', async () => {
   const p = path.join(PIPELINE_ROOT, 'reports', 'job_matches.html');
   const result = await shell.openPath(p);
   return { ok: result === '', error: result || null, path: p };
+});
+
+ipcMain.handle('applications:refresh', async () => {
+  return runPowerShell(['-File', path.join(PIPELINE_ROOT, 'run.ps1'), 'applications-report']);
+});
+
+ipcMain.handle('applications:flag', async (_event, payload) => {
+  const identityKey = String(payload && payload.identityKey ? payload.identityKey : '');
+  const flag = String(payload && payload.flag ? payload.flag : '');
+  if (!/^[0-9a-f]{16}$/.test(identityKey)) {
+    return { code: -1, output: 'Invalid application identity.' };
+  }
+  if (!new Set(['interview', 'denied', 'not_selected']).has(flag)) {
+    return { code: -1, output: 'Invalid application outcome flag.' };
+  }
+  return runPowerShell([
+    '-File', path.join(PIPELINE_ROOT, 'run.ps1'),
+    'application-flag', identityKey, flag,
+  ]);
+});
+
+ipcMain.handle('applications:undo', async (_event, payload) => {
+  const identityKey = String(payload && payload.identityKey ? payload.identityKey : '');
+  if (!/^[0-9a-f]{16}$/.test(identityKey)) {
+    return { code: -1, output: 'Invalid application identity.' };
+  }
+  return runPowerShell([
+    '-File', path.join(PIPELINE_ROOT, 'run.ps1'),
+    'application-undo', identityKey,
+  ]);
+});
+
+ipcMain.handle('applications:read', async () => {
+  const result = readJsonSafe(path.join('reports', 'applications_dashboard.json'));
+  return {
+    exists: result.exists,
+    summary: result.data && result.data.summary ? result.data.summary : {},
+    applications: result.data && Array.isArray(result.data.applications)
+      ? result.data.applications
+      : [],
+    error: result.error || null,
+  };
+});
+
+ipcMain.handle('applications:report-open', async () => {
+  const reportPath = path.join(PIPELINE_ROOT, 'reports', 'applications_dashboard.html');
+  const result = await shell.openPath(reportPath);
+  return { ok: result === '', error: result || null, path: reportPath };
 });
 
 ipcMain.handle('app:info', async () => ({

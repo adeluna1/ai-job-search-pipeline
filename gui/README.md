@@ -43,3 +43,11 @@ and the approval-bound Agent B to Agent C handoff.
 - Application submission is not exposed as an automatic desktop action.
 
 See ../docs/DESKTOP_APP.md for the operating and packaging reference.
+
+## Applications dashboard
+
+The Applications navigation item reads `reports/applications_dashboard.json`. Its Refresh button runs the offline `applications-report` CLI command, and Interactive report opens the self-contained HTML view. Applied-role data remains under the ignored `data/` and `reports/` directories.
+
+### Flagging outcomes
+
+Use the Outcome dropdown on an application row to select Interview, Denied, or Didn't get job. Confirm the change in the prompt; after it saves, the success banner offers Undo. Status changes and reversals update SQLite plus the durable registry as one rollback-safe operation. Distinct outcome flags are retained even when two choices share the rejected lifecycle state.

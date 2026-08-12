@@ -20,10 +20,14 @@ from .agents import (
     RecruiterAgent,
     load_application_profile,
 )
+from .application_dashboard import collect_application_records, export_application_dashboard
 from .application_history import (
     partition_previously_applied,
+    previous_applied_entry_outcome,
     record_applied_entries,
     sync_lifecycle_registry,
+    undo_applied_entry_outcome,
+    update_applied_entry_outcome,
 )
 from .discovery_fallback import (
     is_webclaw_verified,
@@ -44,7 +48,7 @@ from .job_exclusions import partition_excluded_jobs
 from .geography import evaluate_geography, partition_by_geography
 from .handoff import build_agent_c_handoff, validate_agent_c_handoff
 from .jobs import Job, job_from_fixture, normalize_webclaw_job, validate_job
-from .lifecycle import APPLICATION_STATES
+from .lifecycle import APPLICATION_STATES, SEARCH_SUPPRESSION_STATES
 from .matching import apply_ai_score, score_job
 from .report import export_reports
 from .posting_intelligence import enrich_jobs_with_posting_intelligence
@@ -57,6 +61,11 @@ from .webclaw import WebClawClient, WebClawError
 
 LOGGER = logging.getLogger(__name__)
 MAX_AGENT_SHORTLIST = 10
+DASHBOARD_OUTCOME_STATUS = {
+    "interview": "interviewing",
+    "denied": "rejected",
+    "not_selected": "rejected",
+}
 
 
 def project_root() -> Path:
@@ -419,6 +428,126 @@ def command_report(args: argparse.Namespace, root: Path) -> int:
     print(f"Exported {count} ranked jobs: {paths[0]} and {paths[1]}")
     return 0
 
+
+def command_applications_report(args: argparse.Namespace, root: Path) -> int:
+    """Regenerate the applied-jobs dashboard without network access."""
+    with JobStore(root / "data" / "jobs.sqlite3") as store:
+        html_path, csv_path, json_path, summary = export_application_dashboard(
+            store,
+            root / "data" / "applied_jobs.json",
+            root / "reports",
+        )
+    print(
+        f"Exported {summary['total']} applications: {html_path}, {csv_path}, and {json_path}"
+    )
+    return 0
+
+def _restore_registry_snapshot(path: Path, snapshot: bytes | None) -> None:
+    """Restore the exact applied-registry bytes after a failed dashboard transaction."""
+    if snapshot is None:
+        path.unlink(missing_ok=True)
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(snapshot)
+
+
+def command_application_flag(args: argparse.Namespace, root: Path) -> int:
+    """Atomically persist one reviewed Applications-dashboard outcome."""
+    registry_path = root / "data" / "applied_jobs.json"
+    target_status = DASHBOARD_OUTCOME_STATUS[args.flag]
+    note = args.notes.strip() or f"Applications dashboard flag: {args.flag}"
+    registry_snapshot = registry_path.read_bytes() if registry_path.exists() else None
+    with JobStore(root / "data" / "jobs.sqlite3") as store:
+        records = collect_application_records(store, registry_path)
+        target = next(
+            (item for item in records if item["identity_key"] == args.identity_key),
+            None,
+        )
+        if target is None:
+            print(f"Unknown application identity: {args.identity_key}", file=sys.stderr)
+            return 2
+        job = store.job(str(target.get("job_id") or ""))
+        try:
+            if job and not store.set_status(
+                job.id,
+                target_status,
+                note,
+                actor="manual",
+                metadata={"outcome_flag": args.flag, "source": "applications_dashboard"},
+                force=True,
+                commit=False,
+            ):
+                raise RuntimeError(f"Could not update application: {args.identity_key}")
+            if not update_applied_entry_outcome(
+                registry_path,
+                args.identity_key,
+                status=target_status,
+                outcome_flag=args.flag,
+                notes=note,
+            ):
+                raise RuntimeError(
+                    f"Could not update application registry: {args.identity_key}"
+                )
+            html_path, _, _, _ = export_application_dashboard(
+                store, registry_path, root / "reports"
+            )
+            store.connection.commit()
+        except Exception:
+            store.connection.rollback()
+            _restore_registry_snapshot(registry_path, registry_snapshot)
+            raise
+    print(f"Flagged {args.identity_key} as {args.flag}. Report: {html_path}")
+    return 0
+
+
+def command_application_undo(args: argparse.Namespace, root: Path) -> int:
+    """Atomically restore the previous reviewed dashboard outcome."""
+    registry_path = root / "data" / "applied_jobs.json"
+    previous = previous_applied_entry_outcome(registry_path, args.identity_key)
+    if previous is None:
+        print(f"No dashboard change to undo: {args.identity_key}", file=sys.stderr)
+        return 2
+    previous_status = str(previous.get("status") or "").casefold()
+    target_status = (
+        previous_status if previous_status in SEARCH_SUPPRESSION_STATES else "applied"
+    )
+    previous_notes = str(previous.get("notes") or "")
+    registry_snapshot = registry_path.read_bytes() if registry_path.exists() else None
+    with JobStore(root / "data" / "jobs.sqlite3") as store:
+        records = collect_application_records(store, registry_path)
+        target = next(
+            (item for item in records if item["identity_key"] == args.identity_key),
+            None,
+        )
+        if target is None:
+            print(f"Unknown application identity: {args.identity_key}", file=sys.stderr)
+            return 2
+        job = store.job(str(target.get("job_id") or ""))
+        try:
+            if job and not store.set_status(
+                job.id,
+                target_status,
+                previous_notes,
+                actor="manual",
+                metadata={"source": "applications_dashboard", "undo": True},
+                force=True,
+                commit=False,
+            ):
+                raise RuntimeError(f"Could not undo application: {args.identity_key}")
+            if not undo_applied_entry_outcome(registry_path, args.identity_key):
+                raise RuntimeError(
+                    f"Could not undo application registry: {args.identity_key}"
+                )
+            html_path, _, _, _ = export_application_dashboard(
+                store, registry_path, root / "reports"
+            )
+            store.connection.commit()
+        except Exception:
+            store.connection.rollback()
+            _restore_registry_snapshot(registry_path, registry_snapshot)
+            raise
+    print(f"Undid the last dashboard outcome for {args.identity_key}. Report: {html_path}")
+    return 0
 
 def command_status(args: argparse.Namespace, root: Path) -> int:
     """Update the manual application tracker for one job ID."""
@@ -1485,6 +1614,30 @@ def build_parser() -> argparse.ArgumentParser:
     report = sub.add_parser("report", help="regenerate HTML and CSV reports")
     report.add_argument("--min-score", type=float, default=0)
     report.set_defaults(handler=command_report)
+
+    applications_report = sub.add_parser(
+        "applications-report",
+        help="regenerate the applied-jobs HTML, CSV, and JSON dashboard",
+    )
+    applications_report.set_defaults(handler=command_applications_report)
+
+    application_flag = sub.add_parser(
+        "application-flag",
+        help="flag one dashboard application outcome and regenerate reports",
+    )
+    application_flag.add_argument("identity_key")
+    application_flag.add_argument(
+        "flag", choices=("interview", "denied", "not_selected")
+    )
+    application_flag.add_argument("--notes", default="")
+    application_flag.set_defaults(handler=command_application_flag)
+
+    application_undo = sub.add_parser(
+        "application-undo",
+        help="undo the latest dashboard outcome for one application",
+    )
+    application_undo.add_argument("identity_key")
+    application_undo.set_defaults(handler=command_application_undo)
 
     status = sub.add_parser("status", help="update manual application status")
     status.add_argument("job_id")

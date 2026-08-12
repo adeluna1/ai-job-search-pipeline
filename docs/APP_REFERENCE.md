@@ -537,3 +537,15 @@ Packaged builds copy pipeline source and configuration templates to Electron''s
 per-user data directory, preserving existing config. Python and optional service
 runtimes are not bundled. Full operating details and validation commands are in
 docs/DESKTOP_APP.md.
+
+### `applications-report`
+
+Reads `data/applied_jobs.json` and the SQLite application lifecycle, merges company/title aliases, enriches saved roles with location, work mode, salary, fit score, link, notes, and lifecycle dates, then writes HTML, CSV, and JSON dashboard artifacts. It performs no network requests and includes no resume or contact details.
+
+### `application-flag IDENTITY FLAG [--notes TEXT]`
+
+Persists one reviewed Applications-dashboard outcome. `FLAG` is limited to `interview`, `denied`, or `not_selected`. Interview maps to the interviewing lifecycle; denied and not-selected map to rejected while retaining distinct dashboard outcome flags. The command supports legacy registry-only applications, updates a matching SQLite lifecycle and the registry as one rollback-safe operation, records a bounded prior-state history, and regenerates HTML, CSV, and JSON reports.
+
+### `application-undo IDENTITY`
+
+Restores the latest prior dashboard outcome for one application. For detailed jobs it restores SQLite status and notes together with the registry snapshot; for legacy rows it restores the exact prior registry fields. The operation regenerates all dashboard exports and fails without partial status changes.

@@ -219,3 +219,123 @@ def sync_lifecycle_registry(path: Path, job: Job, status: str) -> None:
             "updated_at": utc_now(),
             "jobs": sorted(kept, key=lambda item: (item["company"], item["title"])),
         })
+
+DASHBOARD_OUTCOME_FLAGS = {"interview", "denied", "not_selected"}
+
+
+def update_applied_entry_outcome(
+    path: Path,
+    identity_key: str,
+    *,
+    status: str,
+    outcome_flag: str,
+    notes: str = "",
+) -> bool:
+    """Persist a reviewed dashboard outcome on one applied-registry identity."""
+    if status not in SEARCH_SUPPRESSION_STATES:
+        raise ValueError(f"Unsupported application outcome status: {status}")
+    if outcome_flag not in DASHBOARD_OUTCOME_FLAGS:
+        raise ValueError(f"Unsupported dashboard outcome flag: {outcome_flag}")
+    registry = load_applied_registry(path)
+    changed = False
+    now = utc_now()
+    updated: list[dict[str, Any]] = []
+    for source in registry["jobs"]:
+        item = dict(source)
+        company = str(item.get("company") or "")
+        title = str(item.get("title") or "")
+        item_identity = str(
+            item.get("identity_key") or job_identity_from_fields(company, title)
+        )
+        if item_identity == identity_key:
+            history = list(item.get("dashboard_outcome_history") or [])
+            history.append({
+                "changed_at": now,
+                "previous": {
+                    "status_present": "status" in item,
+                    "status": item.get("status"),
+                    "outcome_flag_present": "outcome_flag" in item,
+                    "outcome_flag": item.get("outcome_flag"),
+                    "notes_present": "notes" in item,
+                    "notes": item.get("notes"),
+                    "status_updated_at_present": "status_updated_at" in item,
+                    "status_updated_at": item.get("status_updated_at"),
+                },
+                "new": {
+                    "status": status,
+                    "outcome_flag": outcome_flag,
+                    "notes": notes.strip(),
+                },
+            })
+            item["identity_key"] = item_identity
+            item["status"] = status
+            item["outcome_flag"] = outcome_flag
+            item["status_updated_at"] = now
+            item["dashboard_outcome_history"] = history[-20:]
+            item["sources"] = sorted({*(item.get("sources") or []), "dashboard"})
+            if notes.strip():
+                item["notes"] = notes.strip()
+            changed = True
+        updated.append(item)
+    if not changed:
+        return False
+    write_json(path, {
+        "schema_version": 2,
+        "updated_at": now,
+        "jobs": sorted(updated, key=lambda item: (item["company"], item["title"])),
+    })
+    return True
+
+def previous_applied_entry_outcome(path: Path, identity_key: str) -> dict[str, Any] | None:
+    """Return the latest durable dashboard snapshot without changing the registry."""
+    registry = load_applied_registry(path)
+    for item in registry["jobs"]:
+        company = str(item.get("company") or "")
+        title = str(item.get("title") or "")
+        item_identity = str(
+            item.get("identity_key") or job_identity_from_fields(company, title)
+        )
+        history = list(item.get("dashboard_outcome_history") or [])
+        if item_identity == identity_key and history:
+            previous = history[-1].get("previous")
+            return dict(previous) if isinstance(previous, dict) else None
+    return None
+
+
+def undo_applied_entry_outcome(path: Path, identity_key: str) -> bool:
+    """Restore the previous dashboard status/outcome snapshot for one application."""
+    registry = load_applied_registry(path)
+    changed = False
+    now = utc_now()
+    updated: list[dict[str, Any]] = []
+    for source in registry["jobs"]:
+        item = dict(source)
+        company = str(item.get("company") or "")
+        title = str(item.get("title") or "")
+        item_identity = str(
+            item.get("identity_key") or job_identity_from_fields(company, title)
+        )
+        history = list(item.get("dashboard_outcome_history") or [])
+        if item_identity == identity_key and history:
+            snapshot = history.pop()
+            previous = snapshot.get("previous") or {}
+            for field in ("status", "outcome_flag", "notes", "status_updated_at"):
+                if previous.get(f"{field}_present"):
+                    item[field] = previous.get(field)
+                else:
+                    item.pop(field, None)
+            if history:
+                item["dashboard_outcome_history"] = history
+            else:
+                item.pop("dashboard_outcome_history", None)
+            item["sources"] = sorted({*(item.get("sources") or []), "dashboard"})
+            changed = True
+        updated.append(item)
+    if not changed:
+        return False
+    write_json(path, {
+        "schema_version": 2,
+        "updated_at": now,
+        "jobs": sorted(updated, key=lambda item: (item["company"], item["title"])),
+    })
+    return True

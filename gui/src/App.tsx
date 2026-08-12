@@ -2,6 +2,7 @@ import { useState } from 'react';
 import {
   Bot,
   Briefcase,
+  ClipboardCheck,
   FileSearch,
   Globe,
   LayoutDashboard,
@@ -12,6 +13,7 @@ import {
 import Dashboard from '@/pages/Dashboard';
 import Search from '@/pages/Search';
 import Jobs from '@/pages/Jobs';
+import Applications from '@/pages/Applications';
 import Agents from '@/pages/Agents';
 import BrowserPage from '@/pages/BrowserPage';
 import PaperclipPage from '@/pages/PaperclipPage';
@@ -22,6 +24,7 @@ const NAV = [
   { key: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { key: 'search', label: 'Search', icon: SearchIcon },
   { key: 'jobs', label: 'Jobs', icon: Briefcase },
+  { key: 'applications', label: 'Applications', icon: ClipboardCheck },
   { key: 'agents', label: 'Agents', icon: Users },
   { key: 'browser', label: 'Browser', icon: Globe },
   { key: 'paperclip', label: 'Paperclip', icon: Bot },
@@ -75,6 +78,7 @@ export default function App() {
         {page === 'dashboard' && <Dashboard />}
         {page === 'search' && <Search />}
         {page === 'jobs' && <Jobs />}
+        {page === 'applications' && <Applications />}
         {page === 'agents' && <Agents />}
         {page === 'browser' && <BrowserPage />}
         {page === 'paperclip' && <PaperclipPage />}

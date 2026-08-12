@@ -63,3 +63,9 @@ Run from gui:
     node --check electron/preload.cjs
 
 Run the Python suite from the repository root after any integration change.
+
+- Applications: refreshes and displays the durable application dashboard with totals, text search, status filters, direct links, and an interactive-report button.
+
+### Outcome dropdown
+
+Each Applications row includes a bounded Outcome dropdown. The renderer asks for confirmation before changing a status. The Electron handler accepts only a 16-character application identity and `interview`, `denied`, or `not_selected`; it invokes the fixed `application-flag` CLI command rather than accepting arbitrary shell input. A successful change exposes Undo, which invokes `application-undo` and restores the previous SQLite and registry status atomically. The updated registry and reports stay local.

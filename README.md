@@ -295,3 +295,29 @@ A packaged desktop release still requires Python 3.10+ on PATH. Paperclip,
 Docker/Resume-Matcher, JobSpy, WebClaw, Agent Web Browser, and browser-use remain
 optional separately installed runtimes. See [the desktop integration reference](docs/DESKTOP_APP.md)
 and [packaging guide](packaging/README.md).
+
+## Applications dashboard
+
+Generate a local dashboard from the durable applied-role registry and SQLite lifecycle history:
+
+```powershell
+python -m job_pipeline applications-report
+```
+
+The command writes:
+
+- `reports/applications_dashboard.html`: interactive search and status filters.
+- `reports/applications_dashboard.csv`: spreadsheet-friendly export.
+- `reports/applications_dashboard.json`: structured input for the Electron Applications page.
+
+Older imported records without an explicit outcome are labeled **Applied - status not recorded**. The dashboard never guesses an interview, rejection, or offer. Update detailed pipeline jobs with `status JOB_ID STATE --notes TEXT`, then regenerate the dashboard.
+
+### Dashboard outcome dropdown
+
+On the desktop Applications page, use each row's **Outcome** dropdown:
+
+- **Interview** moves the lifecycle to `interviewing`.
+- **Denied** moves it to `rejected` and retains the explicit denied flag.
+- **Didn't get job** moves it to `rejected` and retains a separate not-selected flag.
+
+Every selection requires confirmation. The change is written atomically to `data/applied_jobs.json` and SQLite when a matching job ID exists, all three dashboard exports are regenerated, and the success banner offers **Undo** to restore the previous status in both stores.
