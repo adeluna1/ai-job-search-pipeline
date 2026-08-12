@@ -4,6 +4,10 @@
   "results_per_query": 8,
   "queries": [
     "\"recruiting coordinator\" (\"San Jose\" OR \"Bay Area\" OR remote) job",
+    "\"recruiting assistant\" (California OR remote) job",
+    "\"recruiting scheduler\" (California OR remote) job",
+    "\"talent acquisition coordinator\" (California OR remote) job",
+    "\"sourcing coordinator\" (California OR remote) job",
     "\"recruiting operations coordinator\" (California OR remote) job",
     "\"talent operations coordinator\" (\"Bay Area\" OR remote) job",
     "\"candidate experience coordinator\" (California OR remote) job",
@@ -15,7 +19,8 @@
     "\"recruiting associate\" (California OR remote) job",
     "\"talent acquisition associate\" (California OR remote) job",
     "\"talent acquisition specialist\" (California OR remote) job",
-    "\"university recruiter\" (California OR remote) job"
+    "\"university recruiter\" (California OR remote) job",
+    "\"university recruiting coordinator\" (California OR remote) job"
   ],
   "preferred_job_domains": [
     "boards.greenhouse.io",
@@ -23,6 +28,10 @@
     "jobs.lever.co",
     "jobs.ashbyhq.com",
     "myworkdayjobs.com",
-    "careers.smartrecruiters.com"
+    "careers.smartrecruiters.com",
+    "icims.com",
+    "paycomonline.net",
+    "hrmdirect.com",
+    "workwolf.com"
   ]
 }

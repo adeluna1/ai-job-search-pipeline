@@ -13,6 +13,9 @@ test('default search covers the expanded junior recruiting family', () => {
   const value = validateSearchArgs({});
   assert.match(value.query, /Junior Recruiter/);
   assert.match(value.query, /Talent Acquisition Specialist/);
+  assert.match(value.query, /Recruiting Assistant/);
+  assert.ok(value.locations.includes('Remote, United States'));
+  assert.ok(value.locations.includes('Palo Alto, California'));
   assert.equal(value.resultsWanted, 10);
   assert.equal(value.freshHours, 168);
 });
@@ -30,6 +33,10 @@ test('search input is bounded and locations are deduplicated', () => {
   assert.equal(value.concurrency, 4);
 });
 
+test('weekly expansion supports a strict fourteen-day window', () => {
+  const value = validateSearchArgs({ freshHours: 336 });
+  assert.equal(value.freshHours, 336);
+});
 test('pipeline arguments preserve strict freshness and hard top-ten cap', () => {
   const built = buildPipelineSearchArgs('scripts/agent-run.ps1', {
     query: DEFAULT_QUERY,

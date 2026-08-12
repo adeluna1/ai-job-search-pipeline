@@ -148,7 +148,7 @@ export interface ResumePickResult {
 export interface SearchArgs {
   query: string;
   locations: string[];
-  freshHours: 24 | 72 | 168;
+  freshHours: 24 | 72 | 168 | 336;
   resultsWanted: number;
   concurrency: number;
   resumePath: string;

@@ -60,7 +60,24 @@ DIRECT_ATS_DOMAINS = (
     "workable.com",
     "applytojob.com",
     "paylocity.com",
+    "paycomonline.net",
+    "hrmdirect.com",
+    "workwolf.com",
 )
+DIRECT_ATS_SEARCH_GROUPS = {
+    "greenhouse_ashby_lever": ("greenhouse.io", "ashbyhq.com", "lever.co"),
+    "workday_smartrecruiters_icims": (
+        "myworkdayjobs.com",
+        "workday.com",
+        "smartrecruiters.com",
+        "icims.com",
+    ),
+    "paycom_hrmdirect_workwolf": (
+        "paycomonline.net",
+        "hrmdirect.com",
+        "workwolf.com",
+    ),
+}
 NON_APPLICATION_DOMAINS = (
     "facebook.com",
     "instagram.com",
@@ -154,6 +171,13 @@ def _identity_tokens(value: str) -> set[str]:
     }
 
 
+def _identity_slug(value: str) -> str:
+    """Join meaningful employer tokens in their original order for domain matching."""
+    ignored = {"the", "and", "inc", "llc", "corp", "company", "co", "job", "jobs"}
+    tokens = re.findall(r"[a-z0-9]+", normalize_space(value).casefold())
+    return "".join(token for token in tokens if len(token) > 2 and token not in ignored)
+
+
 MULTI_LABEL_PUBLIC_SUFFIXES = {
     "co.uk", "com.au", "co.in", "co.jp", "com.br", "com.mx", "com.sg", "co.nz"
 }
@@ -208,12 +232,13 @@ def direct_application_domain(url: str, company: str) -> dict[str, Any]:
     registrant = _registrant_label(host)
     registrant_tokens = _identity_tokens(registrant.replace("-", " "))
     company_tokens = _identity_tokens(company) - {"unknown"}
-    company_slug = "".join(sorted(company_tokens))
+    company_slug = _identity_slug(company)
+    registrant_slug = re.sub(r"[^a-z0-9]+", "", registrant)
     company_match = bool(
         registrant
         and (
             registrant in company_tokens
-            or registrant.replace("-", "") == company_slug
+            or registrant_slug == company_slug
             or bool(registrant_tokens.intersection(company_tokens))
         )
     )
@@ -286,7 +311,11 @@ def _fresh_application_probe(client: WebClawClient, url: str) -> dict[str, Any]:
         token in final.path.casefold()
         for token in ("/job/", "/jobs/", "/view/", "/position/")
     )
-    if requested_job_path and not final_job_path:
+    if (
+        requested_job_path
+        and not final_job_path
+        and not _is_application_candidate(final_url)
+    ):
         evidence.update(active=False, reason="fresh probe redirected to a generic jobs page")
         return evidence
     closed_markers = (
@@ -310,6 +339,31 @@ def _fresh_application_probe(client: WebClawClient, url: str) -> dict[str, Any]:
         reason="exact job URL survived a no-cache redirect and closure check",
     )
     return evidence
+
+
+def _follow_safe_final_url(
+    client: WebClawClient,
+    requested_url: str,
+    job: Job,
+    probe: dict[str, Any],
+) -> tuple[Job, bool]:
+    """Follow a live redirect only when its final page is another direct job URL."""
+    final_url = canonical_url(str(probe.get("final_url") or requested_url))
+    if final_url == canonical_url(requested_url):
+        return job, False
+    if not _is_application_candidate(final_url) or _is_board_url(final_url):
+        raise WebClawError("fresh probe redirected outside a plausible employer job page")
+    payload = client.scrape(final_url)
+    final_job = normalize_webclaw_job(final_url, payload)
+    valid, reason = validate_job(final_job)
+    if not valid:
+        raise WebClawError(f"redirect target failed job validation: {reason}")
+    if not _same_role(job, final_job):
+        raise WebClawError("redirect target title/company did not match the requested role")
+    domain = direct_application_domain(final_job.url, final_job.company)
+    if domain.get("verified") is not True:
+        raise WebClawError(f"redirect target failed direct-domain verification: {domain['reason']}")
+    return final_job, True
 
 
 def _mark_verified(
@@ -451,6 +505,9 @@ def resolve_employer_application(
                     "error": str(probe.get("reason") or "fresh application probe failed"),
                 })
                 continue
+            candidate_job, followed_redirect = _follow_safe_final_url(
+                client, candidate_url, candidate_job, probe
+            )
             source_has_identity = normalize_space(source_job.title).casefold() not in {
                 "",
                 "untitled role",
@@ -468,8 +525,9 @@ def resolve_employer_application(
                 fresh_probe=probe,
             ), {
                 "source_url": source_url,
-                "resolved_url": candidate_url,
+                "resolved_url": candidate_job.url,
                 "resolution": "employer_application_page",
+                "followed_safe_redirect": followed_redirect,
                 "source_reader": source_reader,
                 "used_resolution_search": used_resolution_search,
                 "candidate_errors": candidate_errors,
@@ -484,6 +542,9 @@ def resolve_employer_application(
                 f"Could not resolve {source_url}: "
                 f"{probe.get('reason') or 'fresh application probe failed'}"
             )
+        source_job, followed_redirect = _follow_safe_final_url(
+            client, source_url, source_job, probe
+        )
         verified = _mark_verified(
             source_job,
             source_url,
@@ -496,6 +557,7 @@ def resolve_employer_application(
             "resolution": "source_is_employer_page",
             "source_reader": source_reader,
             "used_resolution_search": used_resolution_search,
+            "followed_safe_redirect": followed_redirect,
             "candidate_errors": candidate_errors,
         }
 
@@ -570,6 +632,78 @@ def webclaw_fallback_discovery(
         if unique_jobs
         else "unavailable"
         if diagnostics["search_errors_by_board"]
+        else "no_verified_results"
+    )
+    return list(unique_jobs.values()), diagnostics
+
+
+def direct_ats_discovery(
+    client: WebClawClient,
+    search_term: str,
+    locations: Iterable[str],
+    hours_old: int,
+    results_wanted: int,
+) -> tuple[list[Job], dict[str, Any]]:
+    """Discover current jobs directly on trusted ATS hosts, independent of board health."""
+    requested_locations = unique_preserving_order(
+        normalize_space(location) for location in locations if normalize_space(location)
+    )
+    diagnostics: dict[str, Any] = {
+        "requested_locations": requested_locations,
+        "queries_by_group": {},
+        "search_errors_by_group": {},
+        "result_urls_by_group": {},
+        "resolution_records": [],
+        "resolution_errors": [],
+    }
+    search_expression = (
+        search_term if " OR " in search_term.upper() else f'"{search_term}"'
+    )
+    location_expression = " OR ".join(f'"{location}"' for location in requested_locations)
+    days = max(1, (max(1, int(hours_old)) + 23) // 24)
+    per_group = max(1, min(int(results_wanted), 10))
+    jobs: list[Job] = []
+    for group, domains in DIRECT_ATS_SEARCH_GROUPS.items():
+        site_filter = " OR ".join(f"site:{domain}" for domain in domains)
+        query = (
+            f"({search_expression}) ({location_expression or 'United States'}) "
+            f"({site_filter}) (posted OR careers OR apply) past {days} days"
+        )
+        diagnostics["queries_by_group"][group] = query
+        try:
+            results = client.search(query, num=per_group, country="us", language="en")
+        except WebClawError as exc:
+            diagnostics["search_errors_by_group"][group] = str(exc)
+            continue
+        urls = unique_preserving_order(
+            canonical_url(str(result.get("link", "")))
+            for result in results
+            if result.get("link")
+            and any(
+                _host_matches(_host(str(result.get("link", ""))), domain)
+                for domain in domains
+            )
+        )
+        diagnostics["result_urls_by_group"][group] = urls
+        for url in urls:
+            try:
+                job, resolution = resolve_employer_application(client, url)
+                jobs.append(job)
+                diagnostics["resolution_records"].append(resolution)
+            except WebClawError as exc:
+                diagnostics["resolution_errors"].append(
+                    {"source_url": url, "error": str(exc)}
+                )
+
+    unique_jobs: dict[str, Job] = {}
+    for job in jobs:
+        unique_jobs.setdefault(job.url, job)
+    diagnostics["resolved_active_jobs"] = len(unique_jobs)
+    diagnostics["status"] = (
+        "complete"
+        if unique_jobs
+        else "unavailable"
+        if diagnostics["search_errors_by_group"]
         else "no_verified_results"
     )
     return list(unique_jobs.values()), diagnostics

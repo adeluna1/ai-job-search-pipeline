@@ -6,6 +6,7 @@ import argparse
 import json
 import logging
 import os
+import subprocess
 import sys
 from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -30,6 +31,7 @@ from .application_history import (
     update_applied_entry_outcome,
 )
 from .discovery_fallback import (
+    direct_ats_discovery,
     is_webclaw_verified,
     verify_discovered_jobs,
     webclaw_fallback_discovery,
@@ -758,6 +760,39 @@ def command_agent_a_find(args: argparse.Namespace, root: Path) -> int:
             candidate_browser = AgentWebBrowserClient(
                 base_url=args.agent_web_browser_url
             )
+            if not candidate_browser.available():
+                start_script = root / "scripts" / "start-agent-web-browser.ps1"
+                browser_diagnostics["auto_start_attempted"] = start_script.exists()
+                if start_script.exists():
+                    try:
+                        started = subprocess.run(
+                            [
+                                "powershell.exe",
+                                "-NoProfile",
+                                "-ExecutionPolicy",
+                                "Bypass",
+                                "-File",
+                                str(start_script),
+                                "-NoShow",
+                            ],
+                            cwd=root,
+                            capture_output=True,
+                            text=True,
+                            encoding="utf-8",
+                            errors="replace",
+                            timeout=35,
+                            check=False,
+                        )
+                        browser_diagnostics["auto_start_exit_code"] = started.returncode
+                        if started.returncode != 0:
+                            browser_diagnostics["auto_start_error"] = (
+                                started.stderr.strip() or started.stdout.strip()
+                            )[:500]
+                    except (OSError, subprocess.TimeoutExpired) as exc:
+                        browser_diagnostics["auto_start_error"] = str(exc)
+                candidate_browser = AgentWebBrowserClient(
+                    base_url=args.agent_web_browser_url
+                )
             if candidate_browser.available():
                 candidate_browser.status()
                 browser_client = candidate_browser
@@ -815,6 +850,20 @@ def command_agent_a_find(args: argparse.Namespace, root: Path) -> int:
         location_diagnostics["webclaw_fallback"] = location_fallback
         location_runs[location] = location_diagnostics
         fallback_by_location[location] = location_fallback
+
+    direct_ats_diagnostics: dict[str, Any] = {
+        "status": "disabled_by_flag",
+        "resolved_active_jobs": 0,
+    }
+    if not args.no_webclaw_fallback:
+        direct_jobs, direct_ats_diagnostics = direct_ats_discovery(
+            client,
+            search_term=args.query,
+            locations=locations,
+            hours_old=args.hours_old,
+            results_wanted=args.results_wanted,
+        )
+        fallback_jobs.extend(direct_jobs)
 
     result_counts_by_site = {
         site: sum(
@@ -943,6 +992,7 @@ def command_agent_a_find(args: argparse.Namespace, root: Path) -> int:
         ],
         "fallback_sites": fallback_sites,
         "fallback_recommended": bool(fallback_sites),
+        "direct_ats_discovery": direct_ats_diagnostics,
         "note": (
             "Each board is called once per requested city. HTTP 400/403 opens that "
             "board's city-level circuit breaker, and all locations are deduplicated "
@@ -1076,8 +1126,10 @@ def command_agent_a_find(args: argparse.Namespace, root: Path) -> int:
     if not jobspy_jobs and not fallback_jobs:
         errors = diagnostics.get("normalization_errors", [])
         fallback_errors = fallback_diagnostics.get("search_errors_by_location", {})
+        ats_errors = direct_ats_diagnostics.get("search_errors_by_group", {})
         detail = (
             "; ".join(errors[:3])
+            or "; ".join(str(message) for message in ats_errors.values())
             or "; ".join(
                 f"{location}: {messages}"
                 for location, messages in fallback_errors.items()
@@ -1212,6 +1264,11 @@ def command_agent_a_find(args: argparse.Namespace, root: Path) -> int:
             f"JobSpy coverage was unavailable or empty for {missing}; WebClaw fallback status: "
             f"{fallback_diagnostics.get('status', 'unknown')}."
         )
+    print(
+        "Direct ATS discovery status: "
+        f"{direct_ats_diagnostics.get('status', 'unknown')} "
+        f"({direct_ats_diagnostics.get('resolved_active_jobs', 0)} active role(s))."
+    )
     if not shortlist_ids:
         output = args.output or (root / "data" / "agent_a_findings.json")
         write_json(output, {
@@ -1697,13 +1754,14 @@ def build_parser() -> argparse.ArgumentParser:
     agent_a_find.add_argument("--provider", choices=("jobspy",), default="jobspy")
     agent_a_find.add_argument(
         "--query",
-        default=('"Recruiting Coordinator" OR "Recruiting Operations Coordinator" OR '
+        default=('"Recruiting Coordinator" OR "Recruiting Assistant" OR '
+                 '"Recruiting Scheduler" OR "Recruiting Operations Coordinator" OR '
                  '"Talent Acquisition Coordinator" OR "Talent Operations Coordinator" OR '
                  '"Talent Coordinator" OR "Candidate Experience Coordinator" OR '
                  '"Sourcing Coordinator" OR "Junior Recruiter" OR "Recruiter I" OR '
                  '"Associate Recruiter" OR "Recruiting Associate" OR '
                  '"Talent Acquisition Associate" OR "Talent Acquisition Specialist" OR '
-                 '"University Recruiter"'),
+                 '"University Recruiter" OR "University Recruiting Coordinator"'),
     )
     agent_a_find.add_argument(
         "--location",

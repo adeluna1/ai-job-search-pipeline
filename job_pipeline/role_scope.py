@@ -16,6 +16,8 @@ RECRUITING_SEARCH_MARKERS = (
     "talent coordinator",
 )
 ADJACENT_RECRUITING_TITLES = (
+    "recruiting assistant",
+    "recruiting scheduler",
     "recruiting coordinator",
     "recruitment coordinator",
     "talent acquisition coordinator",
@@ -37,7 +39,11 @@ ADJACENT_RECRUITING_TITLES = (
     "recruiting operations specialist",
     "talent operations specialist",
     "university recruiter",
+    "university recruiting coordinator",
     "campus recruiter",
+)
+EXCLUDED_RECRUITING_TITLES = (
+    "technical recruiter",
 )
 SENIOR_RECRUITING_TERMS = (
     "senior", "sr", "lead", "manager", "director", "head", "principal",
@@ -71,6 +77,15 @@ def evaluate_role_scope(job: Job, query: str) -> RoleScopeDecision:
             return RoleScopeDecision(
                 False,
                 f"Title '{job.title}' is senior-level ({senior_match}).",
+            )
+        excluded_match = next(
+            (marker for marker in EXCLUDED_RECRUITING_TITLES if marker in title),
+            "",
+        )
+        if excluded_match:
+            return RoleScopeDecision(
+                False,
+                f"Title '{job.title}' is excluded from the entry-level search ({excluded_match}).",
             )
         if any(marker in title for marker in ADJACENT_RECRUITING_TITLES):
             return RoleScopeDecision(True, "Title matches the expanded junior recruiting family.")

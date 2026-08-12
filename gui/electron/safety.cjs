@@ -2,6 +2,8 @@
 
 const DEFAULT_QUERY = [
   '"Recruiting Coordinator"',
+  '"Recruiting Assistant"',
+  '"Recruiting Scheduler"',
   '"Recruiting Operations Coordinator"',
   '"Talent Acquisition Coordinator"',
   '"Talent Operations Coordinator"',
@@ -15,6 +17,7 @@ const DEFAULT_QUERY = [
   '"Talent Acquisition Associate"',
   '"Talent Acquisition Specialist"',
   '"University Recruiter"',
+  '"University Recruiting Coordinator"',
 ].join(' OR ');
 
 const DEFAULT_LOCATIONS = [
@@ -23,6 +26,16 @@ const DEFAULT_LOCATIONS = [
   'San Jose, California',
   'Oakland, California',
   'Sacramento, California',
+  'Remote, United States',
+  'Remote, California',
+  'California',
+  'Santa Clara, California',
+  'Palo Alto, California',
+  'Mountain View, California',
+  'Sunnyvale, California',
+  'Fremont, California',
+  'Walnut Creek, California',
+  'Pleasanton, California',
 ];
 
 const SESSION_DOMAINS = [
@@ -58,7 +71,9 @@ function validateSearchArgs(input = {}) {
   const query = cleanText(input.query || DEFAULT_QUERY, 'Query', 900);
   const sourceLocations = Array.isArray(input.locations)
     ? input.locations
-    : [input.location || DEFAULT_LOCATIONS[0]];
+    : input.location
+      ? [input.location]
+      : DEFAULT_LOCATIONS;
   const locations = [...new Set(
     sourceLocations
       .flatMap((value) => String(value ?? '').split(/[\n;]+/))
@@ -67,10 +82,16 @@ function validateSearchArgs(input = {}) {
       .map((value) => cleanText(value, 'Location', 120)),
   )];
   if (locations.length === 0) throw new Error('At least one location is required.');
-  if (locations.length > 8) throw new Error('Use no more than eight locations per run.');
+  if (locations.length > 16) throw new Error('Use no more than sixteen locations per run.');
 
-  const requestedFreshHours = boundedInteger(input.freshHours, 168, 1, 168);
-  const freshHours = requestedFreshHours <= 24 ? 24 : requestedFreshHours <= 72 ? 72 : 168;
+  const requestedFreshHours = boundedInteger(input.freshHours, 168, 1, 336);
+  const freshHours = requestedFreshHours <= 24
+    ? 24
+    : requestedFreshHours <= 72
+      ? 72
+      : requestedFreshHours <= 168
+        ? 168
+        : 336;
   const resultsWanted = boundedInteger(input.resultsWanted, 10, 1, 10);
   const concurrency = boundedInteger(input.concurrency, 4, 1, 4);
   const resumePath = String(input.resumePath || '').trim();

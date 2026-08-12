@@ -46,10 +46,13 @@ JobSpy: LinkedIn and Indeed
                  v
 WebClaw missing-board fallback
                  |
-                 +-- optional authenticated read-only board session
+                 +-- automatic authenticated read-only board session when available
+                 |
+                 +-- direct ATS discovery: Greenhouse, Ashby, Lever, Workday,
+                 |   SmartRecruiters, iCIMS, Paycom, HRMDirect, Workwolf
                  |
                  v
-Employer/ATS URL resolution
+Employer/ATS URL resolution with safe final-redirect following
                  |
                  v
 Fresh no-cache exact-application URL and redirect verification
@@ -67,6 +70,7 @@ Resume-weighted scoring --> current-run top 10 --> interactive report
 Agent B review --> Agent C pending human approval
 ```
 
+Daily production searches default to the previous seven days. A 14-day window is available as an explicit weekly expansion; the live active-page, geography, lifecycle, and recency gates still apply.
 ## Posting intelligence
 
 The optional Career Ops-inspired layer is local and deterministic. It adds:

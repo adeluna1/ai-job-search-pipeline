@@ -10,7 +10,7 @@ import type { JobRow, SearchLogPayload } from '@/lib/api';
 export default function Search() {
   const [query, setQuery] = useState('');
   const [locationsText, setLocationsText] = useState('');
-  const [freshHours, setFreshHours] = useState<24 | 72 | 168>(168);
+  const [freshHours, setFreshHours] = useState<24 | 72 | 168 | 336>(168);
   const [concurrency, setConcurrency] = useState(4);
   const [resumePath, setResumePath] = useState('');
   const [running, setRunning] = useState(false);
@@ -90,12 +90,13 @@ export default function Search() {
               <Label className="text-slate-300">Freshness window</Label>
               <select
                 value={freshHours}
-                onChange={(e) => setFreshHours(Number(e.target.value) as 24 | 72 | 168)}
+                onChange={(e) => setFreshHours(Number(e.target.value) as 24 | 72 | 168 | 336)}
                 className="border-slate-700 bg-slate-950 text-slate-200"
               >
                 <option value={24}>Last 24 hours</option>
                 <option value={72}>Last 3 days</option>
-                <option value={168}>Last 7 days</option>
+                <option value={168}>Last 7 days (daily recommended)</option>
+                <option value={336}>Last 14 days (weekly expansion)</option>
               </select>
             </div>
             <div className="grid grid-cols-2 gap-4">

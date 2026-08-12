@@ -20,14 +20,15 @@ Job searches often scatter discovery, resume comparison, notes, and application 
 ## What it does
 
 1. Searches LinkedIn and Indeed through JobSpy and attempts Glassdoor and ZipRecruiter once per run. Indeed/Glassdoor receive `country_indeed` plus a full city/state location; ZipRecruiter receives only its supported location input.
-2. Opens a per-run circuit breaker when a board returns HTTP 400/403, then automatically routes missing coverage through WebClaw search.
-3. When WebClaw cannot read a discovered Glassdoor/ZipRecruiter page, optionally uses Agent Web Browser's authenticated local WebView2 session for sanitized visible text.
-4. Resolves board results to the employer's application page and uses WebClaw to reject closed, generic, access-blocked, redirected, or unverifiable postings.
-5. Adds a local Career Ops-inspired posting-confidence layer: URL/provenance trust, 90-day repost detection, and near-duplicate description fingerprints. These advisory signals never change resume-fit scores.
-6. Scores title alignment, demonstrated skills, experience, location, and responsibility overlap only after the active-page verification gate passes.
-7. Optionally adds a Resume-Matcher tailoring-preview ATS score, keyword gaps, and recommendations without replacing the original explainable score.
-8. Produces an interactive HTML report and a CSV shortlist with match evidence, gaps, and independent posting-confidence evidence.
-9. Coordinates a recruiter agent, an independent verifier, and a browser-use application assistant in Paperclip; every browser action is bound to the exact packet hash, job URL, and approved action.
+2. Opens a per-run circuit breaker when a board returns HTTP 400/403, then routes missing coverage through WebClaw search instead of retrying the blocked board.
+3. Automatically starts Agent Web Browser in safe read-only mode when available, using its authenticated Glassdoor/ZipRecruiter tabs only when WebClaw cannot read a board page.
+4. Searches trusted ATS groups directly on every run: Greenhouse, Ashby, Lever, Workday, SmartRecruiters, iCIMS, Paycom, HRMDirect, and Workwolf.
+5. Resolves board results and safe redirects to the final employer application page, recognizes joined employer domains such as spectrocloud.com, and rejects closed, generic, access-blocked, mismatched, or unverifiable postings.
+6. Adds a local Career Ops-inspired posting-confidence layer: URL/provenance trust, 90-day repost detection, and near-duplicate description fingerprints. These advisory signals never change resume-fit scores.
+7. Scores title alignment, demonstrated skills, experience, location, and responsibility overlap only after the active-page verification gate passes.
+8. Optionally adds a Resume-Matcher tailoring-preview ATS score, keyword gaps, and recommendations without replacing the original explainable score.
+9. Produces an interactive HTML report and a CSV shortlist with match evidence, gaps, and independent posting-confidence evidence.
+10. Coordinates a recruiter agent, an independent verifier, and a browser-use application assistant in Paperclip; every browser action is bound to the exact packet hash, job URL, and approved action.
 
 ## Quick start on Windows
 
@@ -169,6 +170,9 @@ retained as manual maintenance utilities, not alternative production graphs.
   --resume "C:\path\to\resume.docx" --allow-resume-upload
 ```
 
+## Recommended search scope
+
+The desktop app defaults to a seven-day daily search. Its optional 14-day window is intended for a wider weekly pass. The default title family includes entry-level recruiting coordination, scheduling, sourcing, candidate experience, recruiting operations, junior recruiter, Recruiter I, and university recruiting coordination while excluding senior and technical-recruiter roles. The default geography includes Northern California cities plus Remote US, Remote California, and California.
 ## Keys and optional AI
 
 Set values in `.env`; never commit the real file.

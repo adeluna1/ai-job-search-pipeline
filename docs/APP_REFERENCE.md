@@ -321,12 +321,14 @@ The optional resume body exists only in process memory. Optional LLM scoring sen
 | `_payload_links(value, parent_key)` | Reads explicit link fields from WebClaw JSON without mining untrusted body prose. |
 | `_candidate_rank(url)` | Prioritizes known direct ATS links, then employer job paths. |
 | `_identity_tokens(value)` | Produces conservative title/company tokens for identity checks. |
-| `_same_role(source, candidate)` | Requires compatible title and company identity before redirecting. |
+| _identity_slug(value) | Joins meaningful employer tokens in original order so names such as Spectro Cloud can match spectrocloud.com. |
+| direct_application_domain(url, company) | Accepts exact trusted ATS suffixes or a job path on a hostname that safely matches the employer identity; rejects aggregators and lookalikes. |
+| _follow_safe_final_url(client, requested_url, job, probe) | Follows a live redirect only to another plausible direct job URL, then re-scrapes and revalidates its role and domain. || `_same_role(source, candidate)` | Requires compatible title and company identity before redirecting. |
 | `_mark_verified(job, source_url, resolution)` | Adds the timestamped WebClaw verification receipt used by the score gate. |
 | `_fresh_application_probe(client, url)` | Performs a no-cache GET of the exact application URL and rejects HTTP failures, expired redirect markers, generic careers-page redirects, and explicit closure text before a role can be marked verified. |
 | `resolve_employer_application(...)` | Scrapes a result, optionally recovers blocked Glassdoor/ZipRecruiter visible text through AWB, resolves the employer URL, and returns only a validated posting. |
 | `webclaw_fallback_discovery(...)` | Searches missing board coverage through WebClaw, optionally uses AWB page reads, and records every resolution/error. |
-| `verify_discovered_jobs(...)` | Concurrently checks discovered URLs through WebClaw/AWB and returns only active verified postings. |
+| direct_ats_discovery(...) | Searches three trusted ATS groups across the full requested geography and resolves only active direct postings. || `verify_discovered_jobs(...)` | Concurrently checks discovered URLs through WebClaw/AWB and returns only active verified postings. |
 | `is_webclaw_verified(job)` | Validates the stored WebClaw verification receipt used by the scoring gate. |
 
 ### `job_pipeline.integrations.agent_web_browser`

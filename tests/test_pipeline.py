@@ -28,6 +28,7 @@ from job_pipeline.cli import (
 from job_pipeline.handoff import build_agent_c_handoff, validate_agent_c_handoff
 from job_pipeline.discovery_fallback import (
     direct_application_domain,
+    direct_ats_discovery,
     is_webclaw_verified,
     resolve_employer_application,
     verify_discovered_jobs,
@@ -441,6 +442,8 @@ class PipelineTests(unittest.TestCase):
     def test_related_junior_titles_enter_broadened_search(self) -> None:
         """Coordinator, associate, specialist, and junior-recruiter titles are adjacent."""
         for title in (
+            "Recruiting Assistant",
+            "Recruiting Scheduler",
             "Talent Operations Coordinator",
             "Candidate Experience Coordinator",
             "People Operations Coordinator",
@@ -452,6 +455,7 @@ class PipelineTests(unittest.TestCase):
             "Talent Acquisition Associate",
             "Talent Acquisition Specialist",
             "University Recruiter",
+            "University Recruiting Coordinator",
         ):
             job = job_from_fixture({**self.fixtures[0], "title": title})
             self.assertTrue(
@@ -464,6 +468,7 @@ class PipelineTests(unittest.TestCase):
         for title in (
             "Senior Recruiter", "Lead Recruiter", "Recruiting Manager",
             "Director of Talent Acquisition", "Principal Technical Recruiter",
+            "Technical Recruiter",
         ):
             job = job_from_fixture({**self.fixtures[0], "title": title})
             self.assertFalse(
@@ -687,6 +692,101 @@ class PipelineTests(unittest.TestCase):
             ]
         )
 
+    def test_direct_domain_accepts_joined_employer_name_and_trusted_ats(self) -> None:
+        """Recognize legitimate joined company domains without weakening ATS suffix checks."""
+        employer = direct_application_domain(
+            "https://careers.spectrocloud.com/jobs/recruiting-coordinator",
+            "Spectro Cloud",
+        )
+        hrmdirect = direct_application_domain(
+            "https://spectrocloud.hrmdirect.com/employment/job-opening.php?id=123",
+            "Different Display Name",
+        )
+        lookalike = direct_application_domain(
+            "https://spectrocloud.com.evil.example/jobs/recruiting-coordinator",
+            "Spectro Cloud",
+        )
+
+        self.assertTrue(employer["verified"])
+        self.assertEqual(employer["kind"], "employer_domain")
+        self.assertTrue(hrmdirect["verified"])
+        self.assertEqual(hrmdirect["matched_domain"], "hrmdirect.com")
+        self.assertFalse(lookalike["verified"])
+
+    def test_direct_ats_discovery_queries_all_trusted_groups(self) -> None:
+        """Search direct ATS groups even when all ordinary job boards are healthy."""
+        ats_url = "https://jobs.ashbyhq.com/acme/123"
+        description = "Recruiting coordination responsibilities and qualifications. " * 20
+
+        class DirectAtsWebClaw:
+            def search(self, query, num=8, country="us", language="en"):
+                return [{"link": ats_url}]
+
+            def scrape(self, url):
+                return {
+                    "metadata": {"title": "Recruiting Coordinator | Acme"},
+                    "content": {"plain_text": description},
+                    "structured_data": [{
+                        "@type": "JobPosting",
+                        "title": "Recruiting Coordinator",
+                        "hiringOrganization": {"name": "Acme"},
+                        "description": description,
+                        "datePosted": "2026-08-11",
+                        "jobLocation": {
+                            "@type": "Place",
+                            "address": {"addressLocality": "San Francisco"},
+                        },
+                    }],
+                }
+
+        jobs, diagnostics = direct_ats_discovery(
+            DirectAtsWebClaw(),
+            "Recruiting Coordinator",
+            ["San Francisco, California", "Remote, United States"],
+            168,
+            10,
+        )
+
+        self.assertEqual(len(diagnostics["queries_by_group"]), 3)
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0].url, ats_url)
+        self.assertTrue(is_webclaw_verified(jobs[0]))
+
+    def test_resolution_follows_safe_redirect_to_final_ats_job(self) -> None:
+        """Verify the final ATS page instead of rejecting a legitimate job redirect."""
+        source_url = "https://careers.spectrocloud.com/jobs/recruiting-coordinator"
+        final_url = "https://jobs.ashbyhq.com/spectrocloud/123"
+        description = "Recruiting coordination responsibilities and qualifications. " * 20
+
+        class RedirectingWebClaw:
+            def scrape(self, url):
+                company = "Spectro Cloud"
+                return {
+                    "metadata": {"title": f"Recruiting Coordinator | {company}"},
+                    "content": {"plain_text": description},
+                    "structured_data": [{
+                        "@type": "JobPosting",
+                        "title": "Recruiting Coordinator",
+                        "hiringOrganization": {"name": company},
+                        "description": description,
+                    }],
+                }
+
+            def probe(self, url, max_bytes=524_288):
+                return {
+                    "status": 200,
+                    "final_url": final_url,
+                    "content_type": "text/html",
+                    "body": description,
+                }
+
+        job, resolution = resolve_employer_application(
+            RedirectingWebClaw(), source_url
+        )
+
+        self.assertEqual(job.url, final_url)
+        self.assertTrue(resolution["followed_safe_redirect"])
+        self.assertTrue(is_webclaw_verified(job))
     def test_webclaw_fallback_resolves_and_verifies_employer_page(self) -> None:
         """Turn an indexed board result into a validated direct ATS posting."""
         board_url = "https://www.glassdoor.com/job-listing/recruiting-coordinator-acme"
