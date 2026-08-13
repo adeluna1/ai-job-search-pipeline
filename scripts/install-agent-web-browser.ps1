@@ -26,7 +26,7 @@ if ($currentCommit -ne $PinnedCommit) {
 
 $previousPreference = $ErrorActionPreference
 $ErrorActionPreference = 'SilentlyContinue'
-& git -c "safe.directory=$safeSource" -C $SourceRoot apply --reverse --check $PatchPath 2>$null
+& git -c "safe.directory=$safeSource" -C $SourceRoot apply --unidiff-zero --reverse --check $PatchPath 2>$null
 $patchAlreadyApplied = $LASTEXITCODE -eq 0
 $ErrorActionPreference = $previousPreference
 
@@ -34,18 +34,18 @@ if ($patchAlreadyApplied) {
     Write-Host 'Reviewed job-board navigation patch is already applied.'
 }
 else {
-    & git -c "safe.directory=$safeSource" -C $SourceRoot apply --check $PatchPath
+    & git -c "safe.directory=$safeSource" -C $SourceRoot apply --unidiff-zero --check $PatchPath
     if ($LASTEXITCODE -ne 0) {
         throw 'Agent Web Browser patch state is unknown; inspect the source before building.'
     }
-    & git -c "safe.directory=$safeSource" -C $SourceRoot apply $PatchPath
+    & git -c "safe.directory=$safeSource" -C $SourceRoot apply --unidiff-zero $PatchPath
     if ($LASTEXITCODE -ne 0) {
         throw 'Could not apply the narrow Glassdoor/ZipRecruiter navigation patch.'
     }
 }
 
 Write-Host "Agent Web Browser source ready at reviewed commit $PinnedCommit"
-Write-Host 'Safe pipeline mode: first-party Glassdoor/ZipRecruiter navigation and visible-text reads only.'
+Write-Host 'Safe pipeline mode: first-party Glassdoor/ZipRecruiter navigation, visible text, and bounded job-link reads only.'
 
 if ($RunTests -or $Build) {
     $cargoCommand = Get-Command cargo -ErrorAction SilentlyContinue

@@ -141,7 +141,7 @@ Reads at most 10 current-run jobs and scores, validates each posting, rechecks l
 
 ### `agent-a-find [--query TEXT] [--location TEXT] [--site BOARD] [--hours-old N] [--max-results N]`
 
-Runs Agent A's optimized discovery boundary. Each board is attempted once per exact requested location. Captured HTTP 400/403 errors open a run-scoped circuit breaker; missing coverage routes through WebClaw and the optional authenticated read-only browser. Results are resolved to employer URLs and rejected when applied, explicitly excluded, closed, generic, mismatched, out of area, missing a usable date, stale, or unverifiable. Verified jobs receive local posting-confidence, repost, and cross-listing evidence before storage; these fields do not change the resume score. Only the current run is resume-ranked and exported, with a hard maximum of 10 even when a larger `--max-results` value is supplied. The full audit and selected IDs are written to `data/agent_a_discovery.json`.
+Runs Agent A's optimized discovery boundary. Each board is attempted once per exact requested location. Captured HTTP 400/403 errors open a run-scoped circuit breaker; missing coverage routes through WebClaw and the optional authenticated read-only browser. Direct discovery runs per requested title family and per trusted ATS family. Candidates are deduplicated before live resolution and classified as `verified`, `manual_verification_required`, or `rejected`. Manual leads are visible in the interactive report but can never enter Agent B or Agent C. Verified jobs receive local posting-confidence, repost, and cross-listing evidence before storage; these fields do not change the resume score. Only the current run is resume-ranked and exported, with a hard maximum of 10. The full audit, dispositions, counts, and selected IDs are written to `data/agent_a_discovery.json`.
 
 ### `applied-import FILE.json`
 
@@ -328,7 +328,9 @@ The optional resume body exists only in process memory. Optional LLM scoring sen
 | `_fresh_application_probe(client, url)` | Performs a no-cache GET of the exact application URL and rejects HTTP failures, expired redirect markers, generic careers-page redirects, and explicit closure text before a role can be marked verified. |
 | `resolve_employer_application(...)` | Scrapes a result, optionally recovers blocked Glassdoor/ZipRecruiter visible text through AWB, resolves the employer URL, and returns only a validated posting. |
 | `webclaw_fallback_discovery(...)` | Searches missing board coverage through WebClaw, optionally uses AWB page reads, and records every resolution/error. |
-| direct_ats_discovery(...) | Searches three trusted ATS groups across the full requested geography and resolves only active direct postings. || `verify_discovered_jobs(...)` | Concurrently checks discovered URLs through WebClaw/AWB and returns only active verified postings. |
+| `agent_web_browser_board_discovery(...)` | Searches constructed signed-in Glassdoor/ZipRecruiter pages without clicks, opens a run-scoped circuit on access challenges, and resolves extracted listing URLs to verified employer pages. |
+| `direct_ats_discovery(...)` | Searches each requested title family against each trusted ATS family and records queries, results, resolutions, and failures by pair. |
+| `verify_discovered_jobs(...)` | Concurrently checks discovered URLs through WebClaw/AWB and returns only active verified postings plus structured failure evidence. |
 | `is_webclaw_verified(job)` | Validates the stored WebClaw verification receipt used by the scoring gate. |
 
 ### `job_pipeline.integrations.agent_web_browser`
@@ -336,6 +338,7 @@ The optional resume body exists only in process memory. Optional LLM scoring sen
 | Function/class/method | Action |
 |---|---|
 | `AgentWebBrowserPage` | Holds the sanitized URL, title, platform, visible text, and source length. |
+| `AgentWebBrowserSearchResult` | Records the exact board/query/location page and its bounded, validated first-party job-detail URLs. |
 | `AgentWebBrowserClient.__init__(...)` | Accepts only the fixed loopback bridge and refuses all upstream unsafe/write environment flags. |
 | `AgentWebBrowserClient.assert_safe_mode()` | Stops integration when arbitrary navigation, JavaScript, extension mutation, or writes are enabled. |
 | `AgentWebBrowserClient.default_token_path()` | Resolves the actual upstream `%LOCALAPPDATA%\agent-web-browser\api-token` implementation. |
@@ -349,8 +352,13 @@ The optional resume body exists only in process memory. Optional LLM scoring sen
 | `AgentWebBrowserClient.show_window()` | Shows the managed browser for human login or verification. |
 | `AgentWebBrowserClient._validate_board_url(...)` | Allows only exact first-party HTTPS Glassdoor/ZipRecruiter hosts. |
 | `AgentWebBrowserClient._result(...)` | Normalizes wrapped bridge results. |
+| `AgentWebBrowserClient.build_search_url(...)` | Constructs only reviewed Glassdoor or ZipRecruiter HTTPS search URLs with encoded query, direct location text, and bounded age; ZipRecruiter uses its server-rendered `/Jobs` route because the interactive route exposes no job anchors. |
+| `AgentWebBrowserClient._is_board_job_url(...)` | Rejects category, navigation, HTTP, and lookalike anchors before a link leaves the signed-in browser stage. |
+| `AgentWebBrowserClient._sanitize_board_job_url(...)` | Removes board tracking and account/session query values, retaining only the parameters required to identify or display the listing. |
+| `AgentWebBrowserClient._board_job_key(...)` | Deduplicates alternate Glassdoor/ZipRecruiter URLs by stable `jl`, `jobListingId`, `jid`, or `lvk` listing identity. |
+| `AgentWebBrowserClient.search_job_links(...)` | Navigates the reused signed-in board tab and calls only the dedicated `/page/text` and `/page/job-links` read routes; it opens the caller-visible circuit on a challenge. |
 | `AgentWebBrowserClient.read_job_page(...)` | Serializes managed-browser access so concurrent verification workers cannot race the active tab. |
-| `AgentWebBrowserClient._read_job_page_unlocked(...)` | Reuses or opens a board tab, polls boundedly, and returns sanitized visible text without form actions while holding the session lock. |
+| `AgentWebBrowserClient._read_job_page_unlocked(...)` | Reuses or opens a board tab, waits boundedly for the native `pageReady` signal and observer reinjection, then returns sanitized visible text without form actions while holding the session lock. |
 
 ### `job_pipeline.integrations.resume_matcher`
 
@@ -500,6 +508,7 @@ The optional resume body exists only in process memory. Optional LLM scoring sen
 - JobSpy partial board failure: successful results remain usable and missing boards are reported for fallback judgment.
 - JobSpy total failure: `DiscoveryError` exits cleanly; another provider can implement the unchanged `DiscoveryProvider` protocol.
 - Agent Web Browser is not running/authenticated: diagnostics record it and the normal WebClaw path remains available.
+- Signed-in Glassdoor/ZipRecruiter page presents a challenge: that board is not retried for any remaining location in the current run; WebClaw/direct ATS coverage continues.
 - Agent Web Browser unsafe/write flag is enabled: its client refuses to initialize.
 - Live Agent B validation fails: recommendation becomes `skip` with a blocker.
 - Resume-Matcher is not authorized: no resume upload occurs and Agent B stays deterministic.

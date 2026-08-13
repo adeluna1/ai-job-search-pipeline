@@ -20,14 +20,14 @@ Job searches often scatter discovery, resume comparison, notes, and application 
 ## What it does
 
 1. Searches LinkedIn and Indeed through JobSpy and attempts Glassdoor and ZipRecruiter once per run. Indeed/Glassdoor receive `country_indeed` plus a full city/state location; ZipRecruiter receives only its supported location input.
-2. Opens a per-run circuit breaker when a board returns HTTP 400/403, then routes missing coverage through WebClaw search instead of retrying the blocked board.
-3. Automatically starts Agent Web Browser in safe read-only mode when available, using its authenticated Glassdoor/ZipRecruiter tabs only when WebClaw cannot read a board page.
-4. Searches trusted ATS groups directly on every run: Greenhouse, Ashby, Lever, Workday, SmartRecruiters, iCIMS, Paycom, HRMDirect, and Workwolf.
-5. Resolves board results and safe redirects to the final employer application page, recognizes joined employer domains such as spectrocloud.com, and rejects closed, generic, access-blocked, mismatched, or unverifiable postings.
+2. Opens a per-run circuit breaker when a board returns HTTP 400/403, then routes missing coverage through WebClaw search instead of retrying the blocked JobSpy request.
+3. Automatically starts Agent Web Browser in safe read-only mode when available, navigates its signed-in Glassdoor/ZipRecruiter tabs to constructed search pages, extracts only first-party job-detail links, and opens a board-wide circuit for the rest of the run if a challenge blocks access.
+4. Runs bounded searches by requested title family and ATS family on every run: Greenhouse, Ashby, Lever, Workday, SmartRecruiters, iCIMS, Workable, Dayforce, Paycom, HRMDirect, and Workwolf.
+5. Resolves board results and safe redirects to the final employer application page and recognizes joined employer domains such as spectrocloud.com. Closed, stale, suspicious, generic, mismatched, and out-of-scope pages are rejected; relevant blocked or incomplete leads enter a manual-verification queue that cannot reach Agent B or C.
 6. Adds a local Career Ops-inspired posting-confidence layer: URL/provenance trust, 90-day repost detection, and near-duplicate description fingerprints. These advisory signals never change resume-fit scores.
 7. Scores title alignment, demonstrated skills, experience, location, and responsibility overlap only after the active-page verification gate passes.
 8. Optionally adds a Resume-Matcher tailoring-preview ATS score, keyword gaps, and recommendations without replacing the original explainable score.
-9. Produces an interactive HTML report and a CSV shortlist with match evidence, gaps, and independent posting-confidence evidence.
+9. Produces an interactive HTML report and CSV shortlist. The HTML clearly separates verified ranked jobs from manual-verification leads and reports only current-run totals.
 10. Coordinates a recruiter agent, an independent verifier, and a browser-use application assistant in Paperclip; every browser action is bound to the exact packet hash, job URL, and approved action.
 
 ## Quick start on Windows
@@ -70,7 +70,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-agent-web-
 .\tools\upstream\agent-web-browser\src-tauri\target\release\smab.exe
 ```
 
-Log in, consent, and handle CAPTCHA only in its visible window. The pipeline reads its local token from `%LOCALAPPDATA%\agent-web-browser\api-token`. Never enable AWB's arbitrary-navigation, JavaScript, extension-mutation, or write flags for this pipeline.
+Log in, consent, and handle CAPTCHA only in its visible window. The pipeline reads its local token from `%LOCALAPPDATA%\agent-web-browser\api-token`. Its reviewed `/page/job-links` route only enumerates HTTPS job-detail anchors on the active first-party Glassdoor or ZipRecruiter page; ZipRecruiter searches use its server-rendered `/Jobs` route so those anchors exist. The route does not click Apply, fill forms, or modify the account. Never enable AWB's arbitrary-navigation, JavaScript, extension-mutation, or write flags for this pipeline.
 
 Resume-Matcher stays a separate service. The upstream pinned Docker image can be started locally, then configured through its UI at port 3000:
 
@@ -246,7 +246,7 @@ Excluded seniority terms and explicit requirement gaps can reduce the score. Eve
 - Application packets stay private and require a current, integrity-bound Agent B apply handoff plus per-role confirmation. Never treat silence, a prior approval, or a high match score as permission to submit.
 - Agent C must stop for missing or sensitive answers and may act externally only within the exact accepted Paperclip confirmation.
 - The browser is restricted to the job URL's exact HTTPS host. It may not bypass CAPTCHA, bot detection, access controls, or site terms.
-- Agent Web Browser is used only for first-party Glassdoor/ZipRecruiter navigation and sanitized visible-text reads. The pipeline refuses it when any upstream diagnostic or write flag is enabled.
+- Agent Web Browser is used only for first-party Glassdoor/ZipRecruiter search navigation, sanitized visible-text reads, and bounded first-party job-link enumeration. It never clicks Apply or changes the account, and the pipeline refuses it when any upstream diagnostic or write flag is enabled.
 - Fill-only sessions remove click, keyboard-submit, dropdown-selection, and JavaScript tools at runtime; those controls remain a manual handoff.
 - Voluntary demographic, disability, veteran, criminal-history, and unknown questions always return to the candidate.
 - No agent sends recruiter messages, creates accounts, accepts unrelated terms, or invents candidate information.

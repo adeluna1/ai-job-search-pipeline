@@ -30,7 +30,16 @@ from .application_history import (
     undo_applied_entry_outcome,
     update_applied_entry_outcome,
 )
+from .candidate_triage import (
+    classify_resolution_failure,
+    deduplicate_candidates,
+    job_from_resolution_error,
+    manual_disposition,
+    rejected_disposition,
+    verified_disposition,
+)
 from .discovery_fallback import (
+    agent_web_browser_board_discovery,
     direct_ats_discovery,
     is_webclaw_verified,
     verify_discovered_jobs,
@@ -54,7 +63,12 @@ from .lifecycle import APPLICATION_STATES, SEARCH_SUPPRESSION_STATES
 from .matching import apply_ai_score, score_job
 from .report import export_reports
 from .posting_intelligence import enrich_jobs_with_posting_intelligence
-from .role_scope import partition_by_role_scope
+from .role_scope import (
+    evaluate_role_scope,
+    generic_discovery_title_reason,
+    is_manual_review_role,
+    partition_by_role_scope,
+)
 from .resume import ResumeError, extract_docx_text, redact_contact_details, resume_context, resume_terms
 from .storage import JobStore
 from .util import canonical_url, configure_logging, load_dotenv, read_json, unique_preserving_order, utc_now, write_json
@@ -311,6 +325,7 @@ def _export(
     prefix: str = "job_matches",
     job_ids: Iterable[str] | None = None,
     limit: int | None = None,
+    manual_records: list[dict[str, Any]] | None = None,
 ) -> tuple[Path, Path]:
     """Export joined ranking records to HTML and CSV."""
     records = store.ranked(min_score=min_score)
@@ -320,7 +335,13 @@ def _export(
     if limit is not None:
         records = records[:max(0, int(limit))]
     threshold = float(profile["scoring"].get("strong_fit_threshold", 72))
-    return export_reports(records, root / "reports", threshold, prefix=prefix)
+    return export_reports(
+        records,
+        root / "reports",
+        threshold,
+        prefix=prefix,
+        manual_records=manual_records,
+    )
 
 
 def command_doctor(args: argparse.Namespace, root: Path) -> int:
@@ -749,6 +770,8 @@ def command_agent_a_find(args: argparse.Namespace, root: Path) -> int:
     args.fresh_hours = max(1, int(args.hours_old))
     requested_sites = args.site or ["linkedin", "indeed", "glassdoor", "zip_recruiter"]
     client = _client(root, args)
+    profile = load_profile(root)
+    resume_text = _resume_text(args)
     browser_client: AgentWebBrowserClient | None = None
     browser_diagnostics: dict[str, Any] = {
         "enabled": not args.no_agent_web_browser,
@@ -851,6 +874,38 @@ def command_agent_a_find(args: argparse.Namespace, root: Path) -> int:
         location_runs[location] = location_diagnostics
         fallback_by_location[location] = location_fallback
 
+    browser_search_boards = unique_preserving_order(
+        site
+        for run in location_runs.values()
+        for site in run.get("fallback_sites", [])
+        if site in {"glassdoor", "zip_recruiter"}
+    )
+    browser_search_diagnostics: dict[str, Any] = {
+        "requested_boards": browser_search_boards,
+        "status": "not_needed",
+        "resolved_active_jobs": 0,
+        "circuit_breakers": {},
+    }
+    if browser_search_boards and args.no_webclaw_fallback:
+        browser_search_diagnostics["status"] = "disabled_by_flag"
+    elif browser_search_boards and browser_client is None:
+        browser_search_diagnostics["status"] = "unavailable"
+        browser_search_diagnostics["reason"] = browser_diagnostics.get(
+            "reason", "local signed-in browser is unavailable"
+        )
+    elif browser_search_boards and browser_client is not None:
+        browser_jobs, browser_search_diagnostics = agent_web_browser_board_discovery(
+            client,
+            browser_client=browser_client,
+            search_term=args.query,
+            locations=locations,
+            hours_old=args.hours_old,
+            boards=browser_search_boards,
+            results_wanted=args.results_wanted,
+        )
+        fallback_jobs.extend(browser_jobs)
+    browser_diagnostics["search_stage"] = browser_search_diagnostics
+
     direct_ats_diagnostics: dict[str, Any] = {
         "status": "disabled_by_flag",
         "resolved_active_jobs": 0,
@@ -913,6 +968,8 @@ def command_agent_a_find(args: argparse.Namespace, root: Path) -> int:
         fallback_status = "not_needed"
     elif args.no_webclaw_fallback:
         fallback_status = "disabled_by_flag"
+    elif browser_search_diagnostics.get("status") == "complete":
+        fallback_status = "complete"
     elif any(status == "complete" for status in fallback_statuses):
         fallback_status = "complete"
     elif any(status == "unavailable" for status in fallback_statuses):
@@ -936,6 +993,7 @@ def command_agent_a_find(args: argparse.Namespace, root: Path) -> int:
             for item in fallback_by_location.values()
         ),
         "by_location": fallback_by_location,
+        "agent_web_browser_search": browser_search_diagnostics,
         "search_errors_by_location": {
             location: item.get("search_errors_by_board", {})
             for location, item in fallback_by_location.items()
@@ -992,26 +1050,45 @@ def command_agent_a_find(args: argparse.Namespace, root: Path) -> int:
         ],
         "fallback_sites": fallback_sites,
         "fallback_recommended": bool(fallback_sites),
+        "agent_web_browser_search": browser_search_diagnostics,
+        "browser_search_circuit_breakers": browser_search_diagnostics.get(
+            "circuit_breakers", {}
+        ),
         "direct_ats_discovery": direct_ats_diagnostics,
         "note": (
-            "Each board is called once per requested city. HTTP 400/403 opens that "
-            "board's city-level circuit breaker, and all locations are deduplicated "
-            "before one employer-page verification and scoring pass."
+            "JobSpy is called once per requested city. Its HTTP 400/403 response opens "
+            "that attempt's circuit. The signed-in read-only browser then searches exact "
+            "first-party Glassdoor/ZipRecruiter pages; an access challenge opens a board-wide "
+            "circuit for the rest of the run. All links are resolved to employer pages and "
+            "deduplicated before the normal verification and scoring pass."
         ),
     }
 
-    combined: dict[str, Job] = {}
-    for job in [*jobspy_jobs, *fallback_jobs]:
-        combined.setdefault(job.url, job)
+    normalized_sources = [*jobspy_jobs, *fallback_jobs]
+    deduplicated_jobs, duplicate_rejections = deduplicate_candidates(normalized_sources)
+    combined = {job.url: job for job in deduplicated_jobs}
+
+    adjacent_review_jobs = [
+        job for job in deduplicated_jobs
+        if is_manual_review_role(job) and not generic_discovery_title_reason(job.title)
+    ]
+    automatic_scope_jobs = [
+        job for job in deduplicated_jobs if job not in adjacent_review_jobs
+    ]
     role_scoped_jobs, role_scope_rejections = partition_by_role_scope(
-        combined.values(), args.query
+        automatic_scope_jobs, args.query
     )
-    candidate_jobs, previously_applied = partition_previously_applied(
-        role_scoped_jobs, root / "data" / "applied_jobs.json"
+    eligible_scope = [*role_scoped_jobs, *adjacent_review_jobs]
+    unsuppressed_jobs, previously_applied = partition_previously_applied(
+        eligible_scope, root / "data" / "applied_jobs.json"
     )
-    candidate_jobs, explicitly_excluded = partition_excluded_jobs(
-        candidate_jobs, root / "data" / "job_exclusions.json"
+    unsuppressed_jobs, explicitly_excluded = partition_excluded_jobs(
+        unsuppressed_jobs, root / "data" / "job_exclusions.json"
     )
+    allowed_ids = {job.id for job in unsuppressed_jobs}
+    manual_adjacent_jobs = [job for job in adjacent_review_jobs if job.id in allowed_ids]
+    candidate_jobs = [job for job in role_scoped_jobs if job.id in allowed_ids]
+
     live_verified_jobs, verification_errors = verify_discovered_jobs(
         client,
         candidate_jobs,
@@ -1034,6 +1111,142 @@ def command_agent_a_find(args: argparse.Namespace, root: Path) -> int:
             verified_jobs.append(job)
         else:
             freshness_rejections.append((job, finding.to_dict()))
+
+    def preliminary_score(job: Job) -> float:
+        try:
+            return float(score_job(job, profile, resume_text).final_score)
+        except Exception:
+            return 0.0
+
+    rejected_records: list[dict[str, Any]] = []
+    manual_records: list[dict[str, Any]] = []
+    rejected_records.extend(
+        rejected_disposition(job, decision.category, decision.reason)
+        for job, decision in role_scope_rejections
+    )
+    rejected_records.extend(
+        rejected_disposition(job, "already_applied", "Role is already present in the applied-job registry.")
+        for job in previously_applied
+    )
+    rejected_records.extend(
+        rejected_disposition(job, "excluded_history", "Role is closed, removed, previously sent, or explicitly excluded.")
+        for job in explicitly_excluded
+    )
+    for job in manual_adjacent_jobs:
+        geography = evaluate_geography(job, locations)
+        if geography.eligible:
+            manual_records.append(manual_disposition(
+                job,
+                "Adjacent recruiting/people-operations title requires human confirmation before live verification.",
+                failure_category="adjacent_title_review_only",
+                preliminary_score=preliminary_score(job),
+                employer_url=job.url if is_webclaw_verified(job) else "",
+            ))
+        else:
+            rejected_records.append(rejected_disposition(
+                job, "outside_or_unknown_geography", geography.reason
+            ))
+    rejected_records.extend(
+        rejected_disposition(job, "outside_or_unknown_geography", decision.reason)
+        for job, decision in geography_rejections
+    )
+    rejected_records.extend(
+        rejected_disposition(
+            job,
+            "stale_or_unproven_recency",
+            "; ".join(str(value) for value in finding.get("reasons", [])),
+        )
+        for job, finding in freshness_rejections
+    )
+
+    resolved_source_urls = {
+        canonical_url(str(record.get("source_url") or ""))
+        for records in (
+            fallback_diagnostics.get("by_location", {}).values(),
+        )
+        for item in records
+        for record in item.get("resolution_records", [])
+        if record.get("source_url")
+    }
+    resolved_source_urls.update(
+        canonical_url(str(record.get("source_url") or ""))
+        for record in browser_search_diagnostics.get("resolution_records", [])
+        if record.get("source_url")
+    )
+    resolved_source_urls.update(
+        canonical_url(str(record.get("source_url") or ""))
+        for record in direct_ats_diagnostics.get("resolution_records", [])
+        if record.get("source_url")
+    )
+    failure_records: list[dict[str, Any]] = []
+    for location, item in fallback_by_location.items():
+        for record in item.get("resolution_errors", []):
+            failure_records.append({"location": location, **record})
+    failure_records.extend(browser_search_diagnostics.get("resolution_errors", []))
+    failure_records.extend(direct_ats_diagnostics.get("resolution_errors", []))
+    failure_records.extend(verification_errors)
+    unresolved_jobs: list[Job] = []
+    unresolved_by_url: dict[str, dict[str, Any]] = {}
+    for record in failure_records:
+        source_url = canonical_url(str(record.get("url") or record.get("source_url") or ""))
+        if not source_url or (source_url in resolved_source_urls and not record.get("job_id")):
+            continue
+        job = job_from_resolution_error(
+            record,
+            default_location=str(record.get("location") or locations[0]),
+        )
+        unresolved_jobs.append(job)
+        unresolved_by_url.setdefault(canonical_url(job.url), record)
+    unresolved_jobs, unresolved_duplicates = deduplicate_candidates(unresolved_jobs)
+    unresolved_duplicate_source_records = len(unresolved_duplicates)
+    for job in unresolved_jobs:
+        record = unresolved_by_url.get(canonical_url(job.url), {})
+        role = evaluate_role_scope(job, args.query)
+        if not role.eligible and (
+            role.category == "generic_or_unrelated_page"
+            or not is_manual_review_role(job)
+        ):
+            rejected_records.append(rejected_disposition(
+                job, role.category, role.reason
+            ))
+            continue
+        new_jobs, applied = partition_previously_applied(
+            [job], root / "data" / "applied_jobs.json"
+        )
+        if applied:
+            rejected_records.append(rejected_disposition(
+                job, "already_applied", "Unresolved lead matches an applied-job record."
+            ))
+            continue
+        new_jobs, excluded = partition_excluded_jobs(
+            new_jobs, root / "data" / "job_exclusions.json"
+        )
+        if excluded or not new_jobs:
+            rejected_records.append(rejected_disposition(
+                job, "excluded_history", "Unresolved lead matches the exclusion registry."
+            ))
+            continue
+        geography = evaluate_geography(job, locations)
+        if not geography.eligible:
+            rejected_records.append(rejected_disposition(
+                job, "outside_or_unknown_geography", geography.reason
+            ))
+            continue
+        disposition, category = classify_resolution_failure(str(record.get("error") or ""))
+        if disposition == "rejected":
+            rejected_records.append(rejected_disposition(
+                job, category, str(record.get("error") or "Resolution failed.")
+            ))
+            continue
+        employer_url = job.url if record.get("employer_url_found") else ""
+        manual_records.append(manual_disposition(
+            job,
+            str(record.get("error") or "Employer application page could not be confirmed."),
+            failure_category=str(record.get("failure_category") or category),
+            preliminary_score=preliminary_score(job),
+            employer_url=employer_url,
+            source_urls=record.get("source_urls", []),
+        ))
     diagnostics["previously_applied_count"] = len(previously_applied)
     diagnostics["role_scope_gate"] = {
         "query": args.query,
@@ -1113,9 +1326,36 @@ def command_agent_a_find(args: argparse.Namespace, root: Path) -> int:
         "eligible_job_ids": [job.id for job in verified_jobs],
         "excluded_count": len(candidate_jobs) - len(verified_jobs),
     }
+    diagnostics["early_dedupe"] = {
+        "source_job_records": len(normalized_sources),
+        "unique_normalized_positions": len(deduplicated_jobs),
+        "duplicate_source_records": len(duplicate_rejections),
+        "rule": "canonical_url_then_ats_id_then_exact_company_title_location",
+    }
+    diagnostics["manual_verification_queue"] = {
+        "count": len(manual_records),
+        "eligible_for_agent_b": False,
+        "eligible_for_agent_c": False,
+        "records": manual_records,
+    }
+    diagnostics["resolution_failure_dedupe"] = {
+        "source_failure_records": len(failure_records),
+        "unique_failure_positions": len(unresolved_jobs),
+        "duplicate_source_records": unresolved_duplicate_source_records,
+    }
+    diagnostics["candidate_dispositions"] = [*rejected_records, *manual_records]
+    diagnostics["current_run_counts"] = {
+        "source_leads": len(normalized_sources) + len(failure_records),
+        "unique_candidates": len(rejected_records) + len(manual_records) + len(verified_jobs),
+        "verified": 0,
+        "manual_verification_required": len(manual_records),
+        "rejected": len(rejected_records),
+        "hard_gate_passed_pending_scoring": len(verified_jobs),
+        "active_direct_postings_before_scoring": len(verified_jobs),
+    }
     discovery_output = root / "data" / "agent_a_discovery.json"
     write_json(discovery_output, {
-        "schema_version": 2,
+        "schema_version": 3,
         "created_at": utc_now(),
         "query": args.query,
         "location": locations[0] if len(locations) == 1 else " | ".join(locations),
@@ -1123,7 +1363,7 @@ def command_agent_a_find(args: argparse.Namespace, root: Path) -> int:
         "hours_old": args.hours_old,
         "diagnostics": diagnostics,
     })
-    if not jobspy_jobs and not fallback_jobs:
+    if not jobspy_jobs and not fallback_jobs and not manual_records:
         errors = diagnostics.get("normalization_errors", [])
         fallback_errors = fallback_diagnostics.get("search_errors_by_location", {})
         ats_errors = direct_ats_diagnostics.get("search_errors_by_group", {})
@@ -1140,6 +1380,13 @@ def command_agent_a_find(args: argparse.Namespace, root: Path) -> int:
             f"No usable discovery candidates were returned ({detail}). Review {discovery_output}."
         )
     if not candidate_jobs:
+        report_paths = export_reports(
+            [],
+            root / "reports",
+            float(profile["scoring"].get("strong_fit_threshold", 72)),
+            prefix="job_matches",
+            manual_records=manual_records,
+        )
         output = args.output or (root / "data" / "agent_a_findings.json")
         write_json(output, {
             "schema_version": 1,
@@ -1152,16 +1399,17 @@ def command_agent_a_find(args: argparse.Namespace, root: Path) -> int:
         print(
             f"Agent A discovered {len(combined)} normalized jobs; "
             f"{len(previously_applied)} were already applied and "
-            f"{len(explicitly_excluded)} were explicitly excluded. Findings: {output}"
+            f"{len(explicitly_excluded)} were explicitly excluded; "
+            f"{len(manual_records)} require manual verification. Report: {report_paths[0]}. Findings: {output}"
         )
         return 0
     if not verified_jobs:
-        profile = load_profile(root)
         report_paths = export_reports(
             [],
             root / "reports",
             float(profile["scoring"].get("strong_fit_threshold", 72)),
             prefix="job_matches",
+            manual_records=manual_records,
         )
         output = args.output or (root / "data" / "agent_a_findings.json")
         write_json(output, {
@@ -1199,11 +1447,15 @@ def command_agent_a_find(args: argparse.Namespace, root: Path) -> int:
             ),
         )
         stored = store.upsert_jobs(verified_jobs)
-        scored = score_verified_jobs(store, verified_jobs, profile, _resume_text(args))
+        scored = score_verified_jobs(store, verified_jobs, profile, resume_text)
+        current_ids = {job.id for job in verified_jobs}
+        all_ranked_current = [
+            record for record in store.ranked(min_score=0)
+            if record["id"] in current_ids
+        ]
         ranked_current = [
-            record
-            for record in store.ranked(min_score=report_score_floor)
-            if record["id"] in {job.id for job in verified_jobs}
+            record for record in all_ranked_current
+            if float(record["final_score"]) >= report_score_floor
         ]
         shortlist_ids = [record["id"] for record in ranked_current[:max_results]]
         report_paths = _export(
@@ -1213,7 +1465,61 @@ def command_agent_a_find(args: argparse.Namespace, root: Path) -> int:
             report_score_floor,
             job_ids=shortlist_ids,
             limit=max_results,
+            manual_records=manual_records,
         )
+    job_by_id = {job.id: job for job in verified_jobs}
+    score_by_id = {
+        record["id"]: float(record["final_score"]) for record in all_ranked_current
+    }
+    verified_records = [
+        verified_disposition(job_by_id[job_id], score_by_id.get(job_id))
+        for job_id in shortlist_ids
+    ]
+    selected_ids = set(shortlist_ids)
+    for job in verified_jobs:
+        if job.id in selected_ids:
+            continue
+        score = score_by_id.get(job.id, 0.0)
+        category = (
+            "below_strong_fit_threshold"
+            if score < report_score_floor else "shortlist_limit"
+        )
+        reason = (
+            f"Resume fit score {score:.1f} is below the maintained {report_score_floor:.1f} threshold."
+            if category == "below_strong_fit_threshold"
+            else f"Role passed hard gates but ranked below the current-run top {max_results}."
+        )
+        rejected_records.append(rejected_disposition(
+            job,
+            category,
+            reason,
+            preliminary_resume_fit_score=score,
+            employer_url_found=True,
+            canonical_employer_url=job.url,
+        ))
+    diagnostics["candidate_dispositions"] = [
+        *verified_records, *manual_records, *rejected_records
+    ]
+    diagnostics["manual_verification_queue"] = {
+        "count": len(manual_records),
+        "eligible_for_agent_b": False,
+        "eligible_for_agent_c": False,
+        "records": manual_records,
+    }
+    diagnostics["current_run_counts"].update({
+        "unique_candidates": len(verified_records) + len(manual_records) + len(rejected_records),
+        "verified": len(verified_records),
+        "manual_verification_required": len(manual_records),
+        "rejected": len(rejected_records),
+        "hard_gate_passed_pending_scoring": 0,
+        "active_direct_postings_before_scoring": len(verified_jobs),
+    })
+    diagnostics["scoring_gate"] = {
+        "rule": "only_strong-fit active direct postings may enter Agent B",
+        "minimum_score": report_score_floor,
+        "eligible_job_ids": shortlist_ids,
+        "excluded_count": len(verified_jobs) - len(shortlist_ids),
+    }
     intelligence_records = [
         job.raw.get("posting_intelligence", {})
         for job in verified_jobs
@@ -1402,7 +1708,7 @@ def command_agent_b(args: argparse.Namespace, root: Path) -> int:
         if record["analysis"]["recommendation"] == "apply"
     ]
     write_json(output, {
-        "schema_version": 2,
+        "schema_version": 3,
         "agent": MatchAnalystAgent.name,
         "created_at": created_at,
         "threshold": threshold,

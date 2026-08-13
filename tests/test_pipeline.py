@@ -20,6 +20,11 @@ from job_pipeline.application_history import (
     record_applied_entries,
     record_applied_jobs,
 )
+from job_pipeline.candidate_triage import (
+    classify_resolution_failure,
+    deduplicate_candidates,
+    manual_disposition,
+)
 from job_pipeline.cli import (
     _export,
     _transition_application,
@@ -29,6 +34,7 @@ from job_pipeline.cli import (
 )
 from job_pipeline.handoff import build_agent_c_handoff, validate_agent_c_handoff
 from job_pipeline.discovery_fallback import (
+    agent_web_browser_board_discovery,
     direct_application_domain,
     direct_ats_discovery,
     is_webclaw_verified,
@@ -59,7 +65,7 @@ from job_pipeline.posting_intelligence import (
     fingerprint_similarity,
 )
 from job_pipeline.report import export_reports
-from job_pipeline.role_scope import evaluate_role_scope
+from job_pipeline.role_scope import evaluate_role_scope, is_manual_review_role
 from job_pipeline.resume import redact_contact_details, resume_terms
 from job_pipeline.storage import JobStore
 from job_pipeline.util import canonical_url
@@ -348,6 +354,33 @@ class PipelineTests(unittest.TestCase):
         self.assertGreaterEqual(fingerprint_similarity(left, right), 0.92)
         self.assertEqual(content_fingerprint("too short"), "")
 
+    def test_manual_review_queue_is_visible_and_separate_from_ranked_jobs(self) -> None:
+        """Render unresolved leads without implying Agent B or Agent C eligibility."""
+        job = job_from_fixture({
+            **self.fixtures[0],
+            "url": "https://www.glassdoor.com/job-listing/example?jl=123",
+            "title": "Recruiting Coordinator",
+            "company": "Example Co",
+            "location": "San Jose, CA",
+        })
+        manual = manual_disposition(
+            job,
+            "Signed-in board page presented an access challenge.",
+            failure_category="access_blocked",
+            preliminary_score=78.0,
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            html_path, csv_path = export_reports(
+                [], Path(temp), 72, manual_records=[manual]
+            )
+            html_text = html_path.read_text(encoding="utf-8")
+            self.assertTrue(csv_path.exists())
+            self.assertIn("Manual verification queue", html_text)
+            self.assertFalse(manual["eligible_for_agent_b"])
+            self.assertFalse(manual["eligible_for_agent_c"])
+            self.assertIn("Not eligible for Agent B or C", html_text)
+            self.assertIn("Recruiting Coordinator", html_text)
+            self.assertNotIn("class=\"job-card", html_text)
     def test_posting_intelligence_appears_in_reports(self) -> None:
         """Expose posting confidence separately from the original fit score."""
         job = replace(
@@ -505,6 +538,95 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual({item.id for item, _ in rejected}, {new_york.id, unknown.id})
         self.assertFalse(evaluate_geography(new_york, ["San Jose, California"]).eligible)
 
+    def test_expanded_northern_california_metro_groups_fail_closed(self) -> None:
+        """Accept named metro suburbs while excluding Stockton and city-only remote work."""
+        base = dict(self.fixtures[0])
+        roseville = job_from_fixture({
+            **base, "url": "https://example.test/roseville",
+            "location": "Roseville, CA", "work_mode": "onsite",
+        })
+        palo_alto = job_from_fixture({
+            **base, "url": "https://example.test/palo-alto",
+            "location": "Palo Alto, CA", "work_mode": "hybrid",
+        })
+        stockton = job_from_fixture({
+            **base, "url": "https://example.test/stockton",
+            "location": "Stockton, CA", "work_mode": "onsite",
+        })
+        chicago_remote = job_from_fixture({
+            **base, "url": "https://example.test/chicago-remote",
+            "location": "Remote; Chicago, IL", "work_mode": "remote",
+        })
+        nationwide = job_from_fixture({
+            **base, "url": "https://example.test/nationwide",
+            "location": "Remote, United States", "work_mode": "remote",
+        })
+        onsite_irvine = job_from_fixture({
+            **base, "url": "https://example.test/onsite-irvine",
+            "location": "Irvine, CA", "work_mode": "onsite",
+        })
+        remote_irvine = job_from_fixture({
+            **base, "url": "https://example.test/remote-irvine",
+            "location": "Remote, California", "work_mode": "remote",
+        })
+        self.assertTrue(evaluate_geography(roseville, ["Sacramento area"]).eligible)
+        self.assertTrue(evaluate_geography(palo_alto, ["San Francisco Peninsula"]).eligible)
+        self.assertFalse(evaluate_geography(stockton, ["Sacramento area"]).eligible)
+        self.assertFalse(evaluate_geography(chicago_remote, ["Remote United States"]).eligible)
+        self.assertTrue(evaluate_geography(nationwide, ["Remote United States"]).eligible)
+        self.assertFalse(evaluate_geography(onsite_irvine, ["Remote California"]).eligible)
+        self.assertFalse(evaluate_geography(onsite_irvine, ["Remote United States"]).eligible)
+        self.assertTrue(evaluate_geography(remote_irvine, ["Remote California"]).eligible)
+
+    def test_adjacent_people_titles_are_manual_only(self) -> None:
+        """Specified adjacent titles stay visible but cannot enter automatic verification."""
+        for title in (
+            "Recruitment & HR Coordinator",
+            "Talent Strategy & Operations Associate",
+            "Talent Outreach Coordinator",
+            "Recruiting Relations Specialist",
+            "People Engagement Coordinator",
+            "HR Specialist—Recruitment",
+        ):
+            job = job_from_fixture({**self.fixtures[0], "title": title})
+            self.assertTrue(is_manual_review_role(job), title)
+        senior = job_from_fixture({**self.fixtures[0], "title": "Senior Recruiting Relations Specialist"})
+        self.assertFalse(is_manual_review_role(senior))
+
+    def test_early_dedupe_merges_ats_and_location_link_variants(self) -> None:
+        """Verify one position once while retaining every discovery URL as evidence."""
+        first = job_from_fixture({
+            **self.fixtures[0],
+            "url": "https://acme.hrmdirect.com/employment/view.php?req=123&location=sf",
+            "company": "Acme", "title": "Recruiting Coordinator",
+            "location": "San Francisco, CA",
+        })
+        second = job_from_fixture({
+            **self.fixtures[0],
+            "url": "https://acme.hrmdirect.com/employment/view.php?location=sj&req=123",
+            "company": "Acme", "title": "Recruiting Coordinator",
+            "location": "San Jose, CA",
+        })
+        unique, rejected = deduplicate_candidates([first, second])
+        self.assertEqual(len(unique), 1)
+        self.assertEqual(len(rejected), 1)
+        self.assertEqual(rejected[0]["failure_category"], "duplicate")
+        self.assertTrue(unique[0].raw["discovery_evidence"]["deduplicated"])
+
+    def test_resolution_failures_are_classified_for_manual_or_rejection(self) -> None:
+        """Blocked pages remain reviewable while closed and suspicious pages fail closed."""
+        self.assertEqual(
+            classify_resolution_failure("HTTP 403 access challenge"),
+            ("manual_verification_required", "access_blocked"),
+        )
+        self.assertEqual(
+            classify_resolution_failure("This job is closed and no longer available"),
+            ("rejected", "closed_or_stale"),
+        )
+        self.assertEqual(
+            classify_resolution_failure("redirected outside a plausible employer job page"),
+            ("rejected", "unsafe_or_suspicious"),
+        )
     def test_recruiting_coordinator_role_scope_rejects_generic_hr_title(self) -> None:
         """A fuzzy board result must not enter an exact coordinator search report."""
         recruiting = job_from_fixture({
@@ -517,6 +639,19 @@ class PipelineTests(unittest.TestCase):
         })
         self.assertTrue(evaluate_role_scope(recruiting, "Recruiting Coordinator").eligible)
         self.assertFalse(evaluate_role_scope(generic_hr, "Recruiting Coordinator").eligible)
+
+    def test_search_indexes_and_career_guides_are_rejected_not_manual(self) -> None:
+        """Generic discovery pages never enter the manual-verification queue."""
+        for title in (
+            "Recruiting Coordinator Jobs",
+            "123 Results for Recruiting Coordinator",
+            "Recruiting Coordinator Job Description Template",
+            "Recruiting Jobs in San Francisco, CA",
+        ):
+            job = job_from_fixture({**self.fixtures[0], "title": title})
+            decision = evaluate_role_scope(job, "Recruiting Coordinator")
+            self.assertFalse(decision.eligible, title)
+            self.assertEqual(decision.category, "generic_or_unrelated_page", title)
 
     def test_related_junior_titles_enter_broadened_search(self) -> None:
         """Coordinator, associate, specialist, and junior-recruiter titles are adjacent."""
@@ -826,10 +961,24 @@ class PipelineTests(unittest.TestCase):
             10,
         )
 
-        self.assertEqual(len(diagnostics["queries_by_group"]), 3)
+        self.assertEqual(len(diagnostics["queries_by_group"]), 11)
+        self.assertEqual(
+            set(diagnostics["ats_families"]),
+            {
+                "greenhouse", "ashby", "lever", "workday", "smartrecruiters",
+                "icims", "workable", "dayforce", "paycom", "hrmdirect", "workwolf",
+            },
+        )
+        self.assertTrue(all(
+            key.startswith("coordination:")
+            for key in diagnostics["queries_by_title_group_and_ats"]
+        ))
         self.assertEqual(len(jobs), 1)
         self.assertEqual(jobs[0].url, ats_url)
         self.assertTrue(is_webclaw_verified(jobs[0]))
+        self.assertEqual(jobs[0].raw["structured_ats"]["source_platform"], "ashby")
+        self.assertEqual(jobs[0].raw["structured_ats"]["active_status"], "active")
+        self.assertEqual(jobs[0].raw["structured_ats"]["final_application_url"], ats_url)
 
     def test_resolution_follows_safe_redirect_to_final_ats_job(self) -> None:
         """Verify the final ATS page instead of rejecting a legitimate job redirect."""
@@ -1145,6 +1294,169 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(scored, 1)
         self.assertIsNotNone(verified_match)
         self.assertIsNone(unverified_match)
+
+    def test_agent_web_browser_retries_transient_navigation_dom(self) -> None:
+        """A missing observer during navigation is loading, not a board block."""
+        page_reads = 0
+        status_reads = 0
+        description = "About the recruiting coordinator role. " * 20
+
+        def transport(method, path, body, headers):
+            nonlocal page_reads, status_reads
+            if path == "/status":
+                status_reads += 1
+                return {
+                    "ok": True,
+                    "activeTab": 6,
+                    "tabs": [{
+                        "id": 6,
+                        "platform": "glassdoor",
+                        "url": "https://www.glassdoor.com/job-listing/123",
+                        "title": "Recruiting Coordinator | Acme",
+                        "pageReady": status_reads >= 3,
+                    }],
+                }
+            if path == "/page/text":
+                page_reads += 1
+                if page_reads == 1:
+                    return {"ok": False, "error": "document body is loading"}
+                return {"ok": True, "result": {"text": description, "len": len(description)}}
+            return {"ok": True}
+
+        client = AgentWebBrowserClient(token="d" * 64, transport=transport)
+        page = client.read_job_page(
+            "https://www.glassdoor.com/job-listing/123",
+            "glassdoor",
+            poll_attempts=3,
+            poll_delay=0,
+        )
+
+        self.assertEqual(page_reads, 2)
+        self.assertIn("recruiting coordinator", page.text.casefold())
+
+    def test_agent_web_browser_search_uses_only_read_routes(self) -> None:
+        """Construct first-party searches and reject non-job/lookalike anchors."""
+        calls = []
+        description = "Recruiting coordinator jobs in San Francisco. " * 20
+        valid_url = "https://www.glassdoor.com/job-listing/coordinator-acme-JV.htm?jl=123"
+
+        def transport(method, path, body, headers):
+            calls.append((method, path, body, headers))
+            if path == "/status":
+                return {
+                    "ok": True,
+                    "activeTab": 6,
+                    "tabs": [{
+                        "id": 6,
+                        "platform": "glassdoor",
+                        "url": body.get("url") if body else "https://www.glassdoor.com/Job/jobs.htm",
+                        "title": "Recruiting Coordinator Jobs",
+                    }],
+                }
+            if path == "/page/text":
+                return {"ok": True, "result": {"text": description, "len": len(description)}}
+            if path == "/page/job-links":
+                return {"ok": True, "result": {
+                    "board": "glassdoor",
+                    "blocked": False,
+                    "links": [
+                        {"href": valid_url, "text": "Recruiting Coordinator"},
+                        {"href": "https://www.glassdoor.com/partner/jobListing.htm?jobListingId=123"},
+                        {"href": "https://glassdoor.com.evil.example/job-listing/123"},
+                        {"href": "https://www.glassdoor.com/Job/jobs.htm"},
+                    ],
+                }}
+            return {"ok": True}
+
+        client = AgentWebBrowserClient(token="c" * 64, transport=transport)
+        result = client.search_job_links(
+            "glassdoor",
+            "Recruiting Coordinator",
+            "San Francisco, California",
+            168,
+            results_wanted=10,
+            poll_attempts=1,
+        )
+
+        self.assertEqual(result.job_links, [valid_url])
+        self.assertTrue(AgentWebBrowserClient._is_board_job_url(
+            "https://www.ziprecruiter.com/jobs-search?lvk=listing-key",
+            "zip_recruiter",
+        ))
+        self.assertEqual(
+            AgentWebBrowserClient._sanitize_board_job_url(
+                "https://www.ziprecruiter.com/c/Acme/Job/Coordinator?jid=1&uido=private&utm_source=x",
+                "zip_recruiter",
+            ),
+            "https://www.ziprecruiter.com/c/Acme/Job/Coordinator?jid=1",
+        )
+        self.assertIn("sc.keyword=Recruiting+Coordinator", result.search_url)
+        self.assertIn("locKeyword=San+Francisco%2C+California", result.search_url)
+        self.assertIn("fromAge=7", result.search_url)
+        zip_search_url = AgentWebBrowserClient.build_search_url(
+            "zip_recruiter",
+            '"Recruiting Coordinator" OR "Talent Coordinator"',
+            "San Francisco, California",
+            168,
+        )
+        self.assertEqual(
+            zip_search_url,
+            "https://www.ziprecruiter.com/Jobs/Recruiting-Coordinator/"
+            "-in-San-Francisco%2CCA?days=7",
+        )
+        self.assertTrue(any(call[1] == "/page/job-links" for call in calls))
+        self.assertFalse(any(
+            call[1] == "/eval" or call[1].startswith("/action/")
+            for call in calls
+        ))
+
+    def test_browser_discovery_opens_run_scoped_board_circuit(self) -> None:
+        """After an access challenge, skip every remaining location for that board."""
+        calls = []
+        source_urls = {
+            "San Francisco": "https://www.ziprecruiter.com/c/Acme/Job/Coordinator/-in-San-Francisco,CA?jid=1",
+            "San Jose": "https://www.ziprecruiter.com/c/Acme/Job/Coordinator/-in-San-Jose,CA?jid=2",
+        }
+
+        class Browser:
+            def search_job_links(self, board, query, location, hours_old, results_wanted):
+                calls.append((board, location))
+                if board == "glassdoor":
+                    raise AgentWebBrowserError(
+                        "glassdoor browser circuit opened: signed-in page presented an access challenge"
+                    )
+                return SimpleNamespace(
+                    search_url="https://www.ziprecruiter.com/jobs-search",
+                    page_url="https://www.ziprecruiter.com/jobs-search",
+                    title="Jobs",
+                    text_length=500,
+                    job_links=[source_urls[location]],
+                )
+
+        resolved = job_from_fixture(self.fixtures[0])
+        with patch(
+            "job_pipeline.discovery_fallback.resolve_employer_application",
+            return_value=(resolved, {"resolution": "employer_application_page"}),
+        ):
+            jobs, diagnostics = agent_web_browser_board_discovery(
+                client=SimpleNamespace(),
+                browser_client=Browser(),
+                search_term="Recruiting Coordinator",
+                locations=["San Francisco", "San Jose"],
+                hours_old=168,
+                boards=["glassdoor", "zip_recruiter"],
+                results_wanted=10,
+            )
+
+        self.assertEqual(calls.count(("glassdoor", "San Francisco")), 1)
+        self.assertNotIn(("glassdoor", "San Jose"), calls)
+        self.assertIn(("zip_recruiter", "San Francisco"), calls)
+        self.assertIn(("zip_recruiter", "San Jose"), calls)
+        self.assertTrue(diagnostics["circuit_breakers"]["glassdoor"]["open"])
+        self.assertFalse(
+            diagnostics["circuit_breakers"]["glassdoor"]["retry_in_current_run"]
+        )
+        self.assertEqual(len(jobs), 1)
 
     def test_agent_web_browser_uses_authenticated_read_only_routes(self) -> None:
         """Navigate an exact board tab and retrieve sanitized visible text."""

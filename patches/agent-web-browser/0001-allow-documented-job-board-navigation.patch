@@ -1,52 +1,139 @@
+diff --git a/src-tauri/observers/common.js b/src-tauri/observers/common.js
+index 6a4443c..4174e9c 100644
+--- a/src-tauri/observers/common.js
++++ b/src-tauri/observers/common.js
+@@ -96,0 +97 @@
++        if (!main) return { text: '', len: 0 };
+@@ -98,0 +100,60 @@
++      },
++      pageJobLinks: function () {
++        var currentHost = String(location.hostname || '').toLowerCase();
++        var board = currentHost === 'glassdoor.com' || currentHost.endsWith('.glassdoor.com')
++          ? 'glassdoor'
++          : (currentHost === 'ziprecruiter.com' || currentHost.endsWith('.ziprecruiter.com')
++            ? 'ziprecruiter'
++            : '');
++        if (!board) return { blocked: true, reason: 'active page is not a reviewed job board', links: [] };
++        var seen = {};
++        var links = [];
++        Array.prototype.forEach.call(document.querySelectorAll('a[href]'), function (anchor) {
++          try {
++            var target = new URL(anchor.href, location.href);
++            var host = String(target.hostname || '').toLowerCase();
++            var firstParty = board === 'glassdoor'
++              ? (host === 'glassdoor.com' || host.endsWith('.glassdoor.com'))
++              : (host === 'ziprecruiter.com' || host.endsWith('.ziprecruiter.com'));
++            if (target.protocol !== 'https:' || !firstParty) return;
++            var path = target.pathname.toLowerCase();
++            var isJob = board === 'glassdoor'
++              ? (path.indexOf('/job-listing/') !== -1 || target.searchParams.has('jl') || target.searchParams.has('jobListingId'))
++              : ((target.searchParams.has('jid') || target.searchParams.has('lvk')) || /^\/c\/[^/]+\/job\//i.test(target.pathname) || /^\/jobs\/[^/]+\/[^/]+/i.test(target.pathname));
++            if (!isJob) return;
++            target.hash = '';
++            var href = target.toString();
++            if (seen[href] || links.length >= 50) return;
++            seen[href] = true;
++            links.push({ href: href, text: SMAB.sanitizeForAgent((anchor.innerText || anchor.getAttribute('aria-label') || '').trim()).substring(0, 300) });
++          } catch (_) {}
++        });
++        // ZipRecruiter job cards may use client-side state instead of anchor hrefs.
++        // Read only the documented job-view key and reconstruct the current
++        // first-party search URL; never dispatch a click or inspect form data.
++        if (board === 'ziprecruiter' && links.length === 0 && document.documentElement) {
++          var html = document.documentElement.innerHTML || '';
++          var patterns = [
++            /(?:[?&]|&amp;|\\u0026)lvk(?:=|&equals;|\\u003d)([A-Za-z0-9._~-]{6,200})/g,
++            /["']lvk["']\s*:\s*["']([A-Za-z0-9._~-]{6,200})["']/g
++          ];
++          patterns.forEach(function (pattern) {
++            var match;
++            while (links.length < 50 && (match = pattern.exec(html)) !== null) {
++              try {
++                var jobView = new URL(location.href);
++                jobView.hash = '';
++                jobView.searchParams.set('lvk', match[1]);
++                var href = jobView.toString();
++                if (!seen[href]) {
++                  seen[href] = true;
++                  links.push({ href: href, text: '' });
++                }
++              } catch (_) {}
++            }
++          });
++        }
++        var pageText = ((document.body && (document.body.innerText || document.body.textContent)) || '').slice(0, 20000).toLowerCase();
++        var blocked = /(access denied|verify (you are|you're) human|captcha|unusual traffic|temporarily blocked|security check)/.test(pageText)
++          || /\/(login|signin|auth|challenge|captcha)(\/|$)/i.test(location.pathname);
++        return { board: board, blocked: blocked, reason: blocked ? 'signed-in page presented an access challenge' : '', links: links };
 diff --git a/src-tauri/src/api.rs b/src-tauri/src/api.rs
-index a32c407..e65e1a3 100644
+index a32c407..77c992f 100644
 --- a/src-tauri/src/api.rs
 +++ b/src-tauri/src/api.rs
-@@ -456,12 +456,14 @@ fn validate_api_navigation(raw: &str) -> Result<String, String> {
-         "youtube.com",
-         "youtu.be",
-         "twitch.tv",
+@@ -66,0 +67 @@ pub async fn start_api_server(
++        .route("/page/job-links", get(page_job_links))
+@@ -210 +211,2 @@ async fn status(AxState(api): AxState<ApiState>) -> Json<Value> {
+-        "canGoBack": tab.can_go_back(), "canGoForward": tab.can_go_forward(), "loggedIn": tab.logged_in
++        "canGoBack": tab.can_go_back(), "canGoForward": tab.can_go_forward(),
++        "loggedIn": tab.logged_in, "pageReady": tab.page_ready
+@@ -458,0 +461,2 @@ fn validate_api_navigation(raw: &str) -> Result<String, String> {
 +        "glassdoor.com",
 +        "ziprecruiter.com",
-     ]
-     .iter()
-     .any(|expected| exact_or_subdomain(&host, expected));
-     if !allowed && !opt_in_enabled("SMAB_ALLOW_ARBITRARY_NAVIGATION") {
-         return Err(
+@@ -464 +468 @@ fn validate_api_navigation(raw: &str) -> Result<String, String> {
 -            "agent navigation is restricted to supported social platforms; \
 +            "agent navigation is restricted to supported first-party platforms; \
-              set SMAB_ALLOW_ARBITRARY_NAVIGATION=1 for an operator-approved session"
-                 .into(),
-         );
+@@ -501,0 +506,4 @@ async fn page_text(AxState(api): AxState<ApiState>) -> Json<Value> {
++async fn page_job_links(AxState(api): AxState<ApiState>) -> Json<Value> {
++    invoke(&api, "pageJobLinks", json!({}), 10).await
++}
++
+@@ -1112 +1120,2 @@ async fn tabs_list(AxState(api): AxState<ApiState>) -> Json<Value> {
+-        "canGoBack": tab.can_go_back(), "canGoForward": tab.can_go_forward(), "loggedIn": tab.logged_in
++        "canGoBack": tab.can_go_back(), "canGoForward": tab.can_go_forward(),
++        "loggedIn": tab.logged_in, "pageReady": tab.page_ready
+diff --git a/src-tauri/src/main.rs b/src-tauri/src/main.rs
+index 07cb30b..5afcc30 100644
+--- a/src-tauri/src/main.rs
++++ b/src-tauri/src/main.rs
+@@ -27 +27,2 @@ use tauri::{
+-    window::WindowBuilder, LogicalPosition, LogicalSize, Manager, WebviewBuilder, WebviewUrl,
++    webview::PageLoadEvent, window::WindowBuilder, LogicalPosition, LogicalSize, Manager,
++    WebviewBuilder, WebviewUrl,
+@@ -74,0 +76 @@ pub struct TabState {
++    pub page_ready: bool,
+@@ -89,0 +92 @@ impl TabState {
++            page_ready: false,
+@@ -103,0 +107 @@ impl TabState {
++        self.page_ready = false;
+@@ -745 +749 @@ fn main() {
+-        .on_page_load(move |webview, _payload| {
++        .on_page_load(move |webview, payload| {
+@@ -747 +751 @@ fn main() {
+-            if label.starts_with(TAB_PREFIX) {
++            if label.starts_with(TAB_PREFIX) && payload.event() == PageLoadEvent::Finished {
+@@ -751,0 +756,3 @@ fn main() {
++                let tab_id = label
++                    .strip_prefix(TAB_PREFIX)
++                    .and_then(|value| value.parse::<u32>().ok());
+@@ -758,0 +766,7 @@ fn main() {
++                    if let (Some(st), Some(id)) = (app.try_state::<SharedState>(), tab_id) {
++                        if let Some(tab) = st.write().await.tabs.get_mut(&id) {
++                            tab.url = current_url.clone();
++                            tab.platform = platform.slug().to_string();
++                            tab.page_ready = true;
++                        }
++                    }
 diff --git a/src/index.html b/src/index.html
 index 68dd1a2..c833915 100644
 --- a/src/index.html
 +++ b/src/index.html
-@@ -168,6 +168,10 @@
-       finally { isCreating = false; }
-     }
-     async function switchTab(id) { if (activeTabId === id) return; try { await invoke('switch_tab', { tabId: id }); activeTabId = id; renderTabs(); updateNavButtons(); } catch (e) { console.error('switchTab:', e); } }
+@@ -170,0 +171,4 @@
 +    // Expose tab actions to the authenticated loopback bridge.
 +    window.createTab = createTab;
 +    window.switchTab = switchTab;
 +
-     async function closeTab(id) {
-       const idx = tabs.findIndex(t => t.id === id); if (idx === -1) return;
-       try { await invoke('close_tab', { tabId: id }); tabs.splice(idx, 1); delete tabNavState[id];
-@@ -404,14 +408,14 @@
-     // opened here so every platform is ready the moment SMAB starts. Discord is
-     // LAST on purpose — it's the highest ban-risk, and its writes are gated +
-     // circuit-broken, so it loads but stays passive until you act on it.
+@@ -407 +411 @@
 -    const STARTUP_TABS = ['instagram', 'facebook', 'twitter', 'youtube', 'twitch', 'discord'];
 +    const STARTUP_TABS = ['instagram', 'facebook', 'twitter', 'youtube', 'twitch', 'glassdoor', 'ziprecruiter', 'discord'];
-     (async () => {
-       await new Promise((resolve, reject) => { if (window.__TAURI__?.core?.invoke) resolve(); else { const start = Date.now(); const i = setInterval(() => { if (window.__TAURI__?.core?.invoke) { clearInterval(i); resolve(); } else if (Date.now() - start > 5000) { clearInterval(i); reject(new Error('IPC timeout')); } }, 50); } });
-       await ensureApiToken();
-       const first = P_BY_SLUG[STARTUP_TABS[0]] || P_BY_SLUG.discord;
-       tabs = [{ id: 0, title: first.label, url: first.home, platform: first.slug }];
-       activeTabId = 0; nextId = 1; tabNavState[0] = { canGoBack: false, canGoForward: false }; renderTabs();
+@@ -414 +418 @@
 -      // Open the remaining startup platforms, each in its own tab.
 +      // Open the remaining startup platforms, including the two read-only job boards.
-       for (let k = 1; k < STARTUP_TABS.length; k++) {
-         const p = P_BY_SLUG[STARTUP_TABS[k]];
-         if (!p) continue;

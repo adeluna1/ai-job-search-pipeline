@@ -14,7 +14,7 @@ This is a local-first, three-agent job-search pipeline built for targeted recrui
 - **Agent B - Verifier:** confirms that the employer-controlled posting is active, compares it with the corrected resume, explains the match, and returns `apply`, `review`, or `skip`.
 - **Agent C - Application assistant:** prepares truthful application information and can use a restricted browser only after an exact, per-job approval. It must never invent answers or treat a prior approval as reusable permission.
 
-Paperclip coordinates the agents. JobSpy supplies primary multi-board discovery, WebClaw supplies fallback search and employer-page extraction, Agent Web Browser can read authenticated Glassdoor and ZipRecruiter sessions, Resume-Matcher can provide optional ATS evidence, and browser-use powers the approval-gated form assistant.
+Paperclip coordinates the agents. JobSpy supplies primary multi-board discovery, WebClaw supplies fallback search and employer-page extraction, Agent Web Browser can search authenticated Glassdoor and ZipRecruiter sessions through a no-click/read-only link stage, Resume-Matcher can provide optional ATS evidence, and browser-use powers the approval-gated form assistant.
 
 ## Required behavior
 
@@ -44,12 +44,16 @@ JobSpy: LinkedIn and Indeed
                  |       +-- HTTP 400/403 --> stop retrying that board in this run
                  |
                  v
-WebClaw missing-board fallback
+Signed-in browser search (Glassdoor and ZipRecruiter only)
                  |
-                 +-- automatic authenticated read-only board session when available
+                 +-- enumerate first-party job links; never click Apply
+                 +-- challenge --> stop that board for the rest of this run
+                 |
+                 v
+WebClaw employer-page resolution + missing-board search fallback
                  |
                  +-- direct ATS discovery: Greenhouse, Ashby, Lever, Workday,
-                 |   SmartRecruiters, iCIMS, Paycom, HRMDirect, Workwolf
+                 |   SmartRecruiters, iCIMS, Workable, Dayforce, Paycom, HRMDirect, Workwolf
                  |
                  v
 Employer/ATS URL resolution with safe final-redirect following
@@ -59,6 +63,9 @@ Fresh no-cache exact-application URL and redirect verification
                  |
                  v
 Applied/excluded + role + geography + freshness gates
+                 |
+                 v
+Verified / manual_verification_required / rejected disposition split
                  |
                  v
 Local posting confidence and repost/cross-listing evidence

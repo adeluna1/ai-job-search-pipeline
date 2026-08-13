@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 
 class AgentWebBrowserError(RuntimeError):
@@ -48,6 +49,21 @@ class AgentWebBrowserPage:
     text_length: int
 
 
+@dataclass
+class AgentWebBrowserSearchResult:
+    """Read-only links observed on one signed-in first-party board search page."""
+
+    board: str
+    query: str
+    location: str
+    search_url: str
+    page_url: str
+    title: str
+    text_length: int
+    job_links: list[str]
+    job_link_records: list[dict[str, str]] = field(default_factory=list)
+
+
 class AgentWebBrowserClient:
     """Use only safe navigation/read routes from the AWB loopback bridge."""
 
@@ -56,7 +72,7 @@ class AgentWebBrowserClient:
         base_url: str = "http://127.0.0.1:7896",
         token: str | None = None,
         token_path: Path | None = None,
-        timeout: float = 5.0,
+        timeout: float = 15.0,
         transport: Transport | None = None,
     ):
         parts = urlsplit(base_url.rstrip("/"))
@@ -231,11 +247,181 @@ class AgentWebBrowserClient:
         result = payload.get("result", payload)
         return result if isinstance(result, dict) else {}
 
+    @staticmethod
+    def build_search_url(
+        board: str,
+        query: str,
+        location: str,
+        hours_old: int,
+    ) -> str:
+        """Construct one reviewed first-party board URL without form interaction."""
+        if board not in BOARD_DOMAINS:
+            raise AgentWebBrowserError(f"Unsupported AWB job board: {board}")
+        clean_query = " ".join(str(query).split())
+        clean_location = " ".join(str(location).split())
+        if not clean_query or not clean_location:
+            raise AgentWebBrowserError("AWB board search requires query and location text.")
+        if len(clean_query) > 1600 or len(clean_location) > 200:
+            raise AgentWebBrowserError("AWB board search query or location is too long.")
+        days = max(1, min(30, (max(1, int(hours_old)) + 23) // 24))
+        if board == "glassdoor":
+            parameters = {
+                "sc.keyword": clean_query,
+                "locKeyword": clean_location,
+                "fromAge": str(days),
+            }
+            return "https://www.glassdoor.com/Job/jobs.htm?" + urlencode(parameters)
+        # ZipRecruiter's interactive /jobs-search page renders cards without
+        # job-link anchors. Its server-rendered /Jobs category route exposes
+        # first-party detail links, so use one bounded primary term there.
+        quoted_terms = re.findall(r'"([^"\r\n]+)"', clean_query)
+        primary_term = (
+            quoted_terms[0]
+            if " OR " in clean_query.upper() and quoted_terms
+            else clean_query.strip('"() ')
+        )
+        title_slug = re.sub(r"[^A-Za-z0-9]+", "-", primary_term).strip("-")
+        location_value = re.sub(
+            r"(?i),?\s+California$", ",CA", clean_location
+        )
+        location_slug = re.sub(r"\s+", "-", location_value).strip("-")
+        if not title_slug or not location_slug:
+            raise AgentWebBrowserError("ZipRecruiter search path could not be constructed.")
+        return (
+            "https://www.ziprecruiter.com/Jobs/"
+            + quote(title_slug, safe="-")
+            + "/-in-"
+            + quote(location_slug, safe="-")
+            + "?"
+            + urlencode({"days": str(days)})
+        )
+
+    @staticmethod
+    def _is_board_job_url(url: str, board: str) -> bool:
+        """Reject navigation/search/category anchors and retain exact job-detail shapes."""
+        AgentWebBrowserClient._validate_board_url(url, board)
+        parts = urlsplit(url)
+        path = parts.path.casefold()
+        query_keys = {key.casefold() for key in parse_qs(parts.query)}
+        if board == "glassdoor":
+            return "/job-listing/" in path or bool(
+                {"jl", "joblistingid"}.intersection(query_keys)
+            )
+        segments = [segment.casefold() for segment in parts.path.split("/") if segment]
+        return (
+            bool({"jid", "lvk"}.intersection(query_keys))
+            or (len(segments) >= 3 and segments[0] == "c" and segments[2] == "job")
+            or (len(segments) >= 3 and segments[0] == "jobs")
+        )
+
+    @staticmethod
+    def _sanitize_board_job_url(url: str, board: str) -> str:
+        """Remove board tracking/account tokens while preserving listing identity."""
+        AgentWebBrowserClient._validate_board_url(url, board)
+        parts = urlsplit(url)
+        pairs = parse_qsl(parts.query, keep_blank_values=False)
+        if board == "glassdoor":
+            allowed = {"jl", "joblistingid"}
+        elif any(key.casefold() == "lvk" for key, _ in pairs):
+            allowed = {"search", "location", "days", "lvk"}
+        else:
+            allowed = {"jid"}
+        clean_query = urlencode([
+            (key, value)
+            for key, value in pairs
+            if key.casefold() in allowed
+        ])
+        return urlunsplit(("https", parts.netloc.casefold(), parts.path, clean_query, ""))
+
+    @staticmethod
+    def _board_job_key(url: str, board: str) -> str:
+        """Collapse alternate board URLs that identify the same listing."""
+        query = {
+            key.casefold(): values
+            for key, values in parse_qs(urlsplit(url).query).items()
+        }
+        identifiers = (
+            ("jl", "joblistingid")
+            if board == "glassdoor"
+            else ("jid", "lvk")
+        )
+        for identifier in identifiers:
+            values = query.get(identifier, [])
+            if values and values[0]:
+                return f"{board}:{values[0]}"
+        return url
+
+    def search_job_links(
+        self,
+        board: str,
+        query: str,
+        location: str,
+        hours_old: int,
+        results_wanted: int = 10,
+        poll_attempts: int = 24,
+        poll_delay: float = 0.75,
+    ) -> AgentWebBrowserSearchResult:
+        """Navigate a signed-in search page and read job anchors without clicking."""
+        search_url = self.build_search_url(board, query, location, hours_old)
+        with self._session_lock:
+            page = self._read_job_page_unlocked(
+                search_url,
+                board,
+                poll_attempts=poll_attempts,
+                poll_delay=poll_delay,
+            )
+            link_payload = self._result(self._request("GET", "/page/job-links"))
+        if link_payload.get("blocked") is True:
+            reason = str(link_payload.get("reason") or "signed-in page blocked access")
+            raise AgentWebBrowserError(f"{board} browser circuit opened: {reason}")
+        expected_platform = BOARD_PLATFORMS[board]
+        payload_board = str(link_payload.get("board") or "").casefold()
+        if payload_board and payload_board != expected_platform:
+            raise AgentWebBrowserError(
+                f"{board} browser circuit opened: active page changed platforms"
+            )
+        limit = max(1, min(int(results_wanted), 50))
+        job_links: list[str] = []
+        job_link_records: list[dict[str, str]] = []
+        seen_job_keys: set[str] = set()
+        for item in link_payload.get("links", []):
+            href = str(item.get("href") if isinstance(item, dict) else item or "").strip()
+            link_text = (
+                " ".join(str(item.get("text") or "").split())
+                if isinstance(item, dict) else ""
+            )
+            if not href:
+                continue
+            try:
+                if not self._is_board_job_url(href, board):
+                    continue
+            except AgentWebBrowserError:
+                continue
+            href = self._sanitize_board_job_url(href, board)
+            job_key = self._board_job_key(href, board)
+            if job_key not in seen_job_keys:
+                seen_job_keys.add(job_key)
+                job_links.append(href)
+                job_link_records.append({"url": href, "text": link_text})
+            if len(job_links) >= limit:
+                break
+        return AgentWebBrowserSearchResult(
+            board=board,
+            query=" ".join(str(query).split()),
+            location=" ".join(str(location).split()),
+            search_url=search_url,
+            page_url=page.url,
+            title=page.title,
+            text_length=page.text_length,
+            job_links=job_links,
+            job_link_records=job_link_records,
+        )
+
     def read_job_page(
         self,
         url: str,
         board: str,
-        poll_attempts: int = 5,
+        poll_attempts: int = 20,
         poll_delay: float = 0.5,
     ) -> AgentWebBrowserPage:
         """Serialize managed-tab use and return sanitized visible job-page text."""
@@ -286,7 +472,8 @@ class AgentWebBrowserClient:
 
         final_status: dict[str, Any] = {}
         text_payload: dict[str, Any] = {}
-        for attempt in range(max(1, min(int(poll_attempts), 10))):
+        last_read_error = ""
+        for attempt in range(max(1, min(int(poll_attempts), 60))):
             if attempt:
                 time.sleep(max(0.0, min(float(poll_delay), 2.0)))
             final_status = self.status()
@@ -301,7 +488,15 @@ class AgentWebBrowserClient:
             )
             if str(active_tab.get("platform", "")).casefold() != platform:
                 continue
-            text_payload = self._result(self._request("GET", "/page/text"))
+            if active_tab.get("pageReady", True) is not True:
+                continue
+            try:
+                text_payload = self._result(self._request("GET", "/page/text"))
+            except AgentWebBrowserError as exc:
+                # The observer may be temporarily absent while WebView2 replaces the
+                # document during navigation. Treat that as loading, not as a board block.
+                last_read_error = str(exc)
+                continue
             if str(text_payload.get("text") or "").strip():
                 break
 
@@ -316,8 +511,9 @@ class AgentWebBrowserClient:
         )
         text = str(text_payload.get("text") or "").strip()
         if not text:
+            detail = f" Last loading error: {last_read_error}" if last_read_error else ""
             raise AgentWebBrowserError(
-                f"AWB did not return visible {board} page text after navigation."
+                f"AWB did not return visible {board} page text after navigation.{detail}"
             )
         return AgentWebBrowserPage(
             url=str(active_tab.get("url") or target_url),

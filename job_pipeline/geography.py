@@ -25,6 +25,24 @@ SAN_JOSE_TERMS = {
     "cupertino", "milpitas", "mountain view", "campbell", "los gatos",
 }
 
+SACRAMENTO_METRO_TERMS = {
+    "sacramento", "roseville", "rocklin", "folsom", "rancho cordova",
+}
+SOUTH_BAY_TERMS = {
+    "san jose", "santa clara", "sunnyvale", "cupertino", "milpitas",
+    "mountain view", "campbell", "los gatos",
+}
+EAST_BAY_TERMS = {
+    "oakland", "berkeley", "alameda", "emeryville", "fremont", "hayward",
+    "walnut creek", "concord", "pleasanton", "san ramon", "newark",
+    "union city",
+}
+SAN_FRANCISCO_PENINSULA_TERMS = {
+    "san francisco", "south san francisco", "daly city", "san mateo",
+    "redwood city", "menlo park", "palo alto", "foster city", "burlingame",
+    "san bruno", "san carlos",
+}
+
 REMOTE_BROAD_TERMS = {
     "united states", "usa", "us", "nationwide", "anywhere",
     "california", "ca",
@@ -50,13 +68,23 @@ def _requested_terms(locations: Iterable[str]) -> set[str]:
         normalized = normalize_term(location)
         if not normalized:
             continue
-        terms.add(normalized)
+        if not normalized.startswith("remote "):
+            terms.add(normalized)
         if "bay area" in normalized or "san francisco bay" in normalized:
             terms.update(BAY_AREA_TERMS)
-        if "san jose" in normalized:
+        if "san jose" in normalized or "south bay" in normalized:
             terms.update(SAN_JOSE_TERMS)
+            terms.update(SOUTH_BAY_TERMS)
+        if "oakland" in normalized or "east bay" in normalized:
+            terms.update(EAST_BAY_TERMS)
+        if "san francisco" in normalized or "peninsula" in normalized:
+            terms.update(SAN_FRANCISCO_PENINSULA_TERMS)
+        if "sacramento" in normalized:
+            terms.update(SACRAMENTO_METRO_TERMS)
         if normalized in {"united states", "usa", "us"}:
             terms.update(REMOTE_BROAD_TERMS)
+        if normalized == "california":
+            terms.update({"california", "ca"})
     return terms
 
 
@@ -85,12 +113,28 @@ def evaluate_geography(job: Job, requested_locations: Iterable[str]) -> Geograph
     }:
         return GeographyDecision(False, "Posting location is unknown or unspecified.")
 
-    if _contains_term(evidence, terms):
+    if terms and _contains_term(evidence, terms):
         return GeographyDecision(True, "Posting names a requested city or metro.")
 
     remote = "remote" in work_mode or _contains_term(evidence, {"remote"})
-    if remote and _contains_term(evidence, REMOTE_BROAD_TERMS):
-        return GeographyDecision(True, "Remote posting is available in the US or California.")
+    normalized_requests = {normalize_term(item) for item in locations}
+    remote_us_requested = bool(normalized_requests.intersection({
+        "remote united states", "remote us", "remote usa",
+    }))
+    remote_ca_requested = bool(normalized_requests.intersection({
+        "remote california", "remote ca",
+    }))
+    non_remote_scope_requested = any(
+        not value.startswith("remote ") for value in normalized_requests
+    )
+    if remote and remote_us_requested and _contains_term(
+        evidence, {"united states", "usa", "us", "nationwide", "anywhere"}
+    ):
+        return GeographyDecision(True, "Remote posting explicitly allows nationwide US work.")
+    if remote and remote_ca_requested and _contains_term(evidence, {"california", "ca"}):
+        return GeographyDecision(True, "Remote posting explicitly allows California work.")
+    if remote and non_remote_scope_requested and _contains_term(evidence, REMOTE_BROAD_TERMS):
+        return GeographyDecision(True, "Remote posting is broadly available in the US or California.")
 
     requested = ", ".join(locations)
     return GeographyDecision(

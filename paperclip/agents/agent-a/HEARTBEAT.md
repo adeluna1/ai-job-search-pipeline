@@ -7,7 +7,7 @@
 
    `./scripts/agent-run.cmd agent-a-find --location "San Francisco Bay Area" --location "San Jose, California" --hours-old 168 --fresh-days 7 --results-wanted 10 --max-results 10 --resume "$env:JOB_PIPELINE_RESUME"`
 
-5. Read only the required summary fields from `data/agent_a_discovery.json`: each board's attempt count/status, open circuit breakers, WebClaw fallback status, Agent Web Browser availability/use, employer-URL resolutions, verification-error count, `verified_active_count`, `previously_applied_count`, `geography_gate`, and `shortlist_gate`. Confirm the shortlist has no more than 10 current-run IDs and every retained role passed the exact geography gate. Do not dump full JSON or job descriptions. Do not run a second board search.
+5. Read only the required summary fields from `data/agent_a_discovery.json`: each board's attempt count/status, open circuit breakers, WebClaw fallback status, Agent Web Browser availability/use, employer-URL resolutions, verification-error count, `verified_active_count`, `previously_applied_count`, `geography_gate`, `current_run_counts`, `manual_verification_queue`, and `shortlist_gate`. Confirm the shortlist has no more than 10 current-run IDs, every retained role passed the exact geography gate, and every manual record has `eligible_for_agent_b=false` and `eligible_for_agent_c=false`. Do not dump full JSON or job descriptions. Do not run a second board search.
 
 6. If discovery was separate from triage, pass only the current run's `shortlist_gate.selected_job_ids` (maximum 10), plus the exact locations:
 
