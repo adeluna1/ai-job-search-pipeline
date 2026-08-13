@@ -145,6 +145,15 @@ def _salary_text(value: Any) -> str:
 def _split_page_title(value: str) -> tuple[str, str]:
     """Derive a conservative title/company fallback from common page-title separators."""
     value = normalize_space(value)
+    hrmdirect_title = re.match(
+        r"(?i)^(?P<title>.+?)\s*,?\s+careers\s+at\s+(?P<company>.+)$",
+        value,
+    )
+    if hrmdirect_title:
+        return (
+            normalize_space(hrmdirect_title.group("title")),
+            normalize_space(hrmdirect_title.group("company")),
+        )
     for separator in (" | ", " - ", " at ", " @ "):
         if separator in value:
             parts = [part.strip() for part in value.split(separator) if part.strip()]
@@ -163,6 +172,12 @@ def _company_from_markdown(url: str, markdown: str) -> str:
         path_parts = [part for part in urlsplit(url).path.split("/") if part]
         if path_parts:
             slug = re.sub(r"[-_]", " ", path_parts[0])
+            return normalize_space(slug.title())
+    if host == "hrmdirect.com" or host.endswith(".hrmdirect.com"):
+        labels = host.split(".")
+        tenant = labels[-3] if len(labels) >= 3 else ""
+        if tenant not in {"", "www", "secure", "jobs", "careers"}:
+            slug = re.sub(r"[-_]+", " ", tenant)
             return normalize_space(slug.title())
     return ""
 

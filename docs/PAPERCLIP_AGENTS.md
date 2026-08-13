@@ -134,7 +134,7 @@ Expected final state: Agent A identifies the aligned fixture, Agent B recommends
 | `scripts/test-paperclip.ps1` | Verifies all roles are present, paused, sandboxed, and assigned; `-ProbeCodex` adds a minimal authenticated adapter probe |
 | `scripts/install-agent-integrations.ps1` | Creates independent pinned JobSpy and browser-use runtimes to avoid dependency conflicts |
 | `scripts/install-agent-web-browser.ps1` | Clones the reviewed AWB commit, applies the narrow first-party job-board patch, and optionally tests/builds it |
-| `scripts/agent-run.ps1` / `.cmd` | Selects the JobSpy or browser-use runtime from the specialist command; the CMD wrapper handles locked-down PowerShell policy |
+| `scripts/agent-run.ps1` / `.cmd` | Repairs quoted `OR` queries split by legacy Windows forwarding, selects the JobSpy or browser-use runtime, and handles locked-down PowerShell policy |
 | `scripts/paperclip.ps1` | Pass-through CLI wrapper for the isolated Paperclip instance |
 | `scripts/_paperclip-common.ps1` | Shared paths, environment, health check, and CLI invocation |
 

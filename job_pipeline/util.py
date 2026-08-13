@@ -89,8 +89,19 @@ def canonical_url(url: str) -> str:
         query = reparsed.query
     else:
         path, query = parts.path, parts.query
+    query_items = parse_qsl(query, keep_blank_values=True)
+    host = netloc.casefold().split(":", 1)[0]
+    if host == "hrmdirect.com" or host.endswith(".hrmdirect.com"):
+        requisition_items = [
+            (key, value)
+            for identifier in ("req", "id")
+            for key, value in query_items
+            if key.casefold() == identifier and value
+        ]
+        if requisition_items:
+            query_items = requisition_items[:1]
     kept = []
-    for key, value in parse_qsl(query, keep_blank_values=True):
+    for key, value in query_items:
         if not any(key.casefold().startswith(prefix) for prefix in TRACKING_QUERY_PREFIXES):
             kept.append((key, value))
     clean_path = re.sub(r"/{2,}", "/", path or "/")

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import subprocess
 import tempfile
 import unittest
 from dataclasses import replace
@@ -88,6 +90,83 @@ class PipelineTests(unittest.TestCase):
         """Ensure tracking parameters and fragments cannot create duplicate jobs."""
         cleaned = canonical_url("https://Jobs.Example.com/role/?utm_source=x&id=42#apply")
         self.assertEqual(cleaned, "https://jobs.example.com/role?id=42")
+
+    def test_hrmdirect_canonical_url_deduplicates_location_variants(self) -> None:
+        """Use the requisition ID as the HRMDirect identity across location links."""
+        first = canonical_url(
+            "https://fisherphillips.hrmdirect.com/employment/view.php?"
+            "req=3785256&jbsrc=1014&location=alpha"
+        )
+        second = canonical_url(
+            "https://fisherphillips.hrmdirect.com/employment/view.php?"
+            "location=beta&req=3785256&jbsrc=other"
+        )
+        self.assertEqual(first, second)
+        self.assertEqual(
+            first,
+            "https://fisherphillips.hrmdirect.com/employment/view.php?req=3785256",
+        )
+
+    def test_hrmdirect_title_recovers_company_and_clean_role_title(self) -> None:
+        """Parse HRMDirect's Careers At title convention before ATS fallback scoring."""
+        description = "Recruiting responsibilities and qualifications. " * 20
+        job = normalize_webclaw_job(
+            "https://fisherphillips.hrmdirect.com/employment/view.php?req=3785256",
+            {
+                "metadata": {
+                    "title": (
+                        "Attorney Recruiting Coordinator, Careers At "
+                        "Fisher & Phillips LLP"
+                    )
+                },
+                "content": {"plain_text": description},
+                "structured_data": [],
+            },
+        )
+        self.assertEqual(job.title, "Attorney Recruiting Coordinator")
+        self.assertEqual(job.company, "Fisher & Phillips LLP")
+
+    def test_hrmdirect_domain_is_a_safe_company_fallback(self) -> None:
+        """Use the HRMDirect tenant only when structured and title evidence are absent."""
+        job = normalize_webclaw_job(
+            "https://spectro-cloud.hrmdirect.com/employment/view.php?req=123",
+            {
+                "metadata": {"title": "Recruiting Coordinator"},
+                "content": {
+                    "plain_text": "Recruiting responsibilities and qualifications. " * 20
+                },
+                "structured_data": [],
+            },
+        )
+        self.assertEqual(job.company, "Spectro Cloud")
+
+    @unittest.skipUnless(os.name == "nt", "Windows launcher regression")
+    def test_cmd_launcher_preserves_quoted_or_query(self) -> None:
+        """The CMD wrapper must not split a quoted OR query into argparse leftovers."""
+        completed = subprocess.run(
+            [
+                "cmd.exe",
+                "/d",
+                "/c",
+                str(ROOT / "scripts" / "agent-run.cmd"),
+                "agent-a-find",
+                "--query",
+                '"Recruiting Coordinator" OR "Recruiting Assistant"',
+                "--no-agent-web-browser",
+                "--help",
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            check=False,
+        )
+        output = completed.stdout + completed.stderr
+        self.assertEqual(completed.returncode, 0, output)
+        self.assertIn("usage:", output)
+        self.assertNotIn("unrecognized arguments", output)
 
     def test_jsonld_job_normalization(self) -> None:
         """Prefer Schema.org JobPosting facts over ambiguous page-title fallbacks."""

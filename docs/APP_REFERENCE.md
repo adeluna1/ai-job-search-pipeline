@@ -175,7 +175,7 @@ Runs all three specialist contracts on fictional fixtures without WebClaw or a n
 | `scripts/_paperclip-common.ps1` | Resolves project-local binaries, sets runtime paths/telemetry preference, implements the CLI wrapper, and checks localhost health. |
 | `scripts/install-agent-integrations.ps1` | Creates independent pinned JobSpy and browser-use virtual environments and validates imports. |
 | `scripts/install-agent-web-browser.ps1` | Clones the reviewed AWB commit, applies the two-domain navigation patch idempotently, and optionally runs Rust tests/build. |
-| `scripts/agent-run.ps1` / `.cmd` | Selects the JobSpy runtime for `agent-a-find` or browser-use runtime for `agent-c-browser`. |
+| `scripts/agent-run.ps1` / `.cmd` | Repairs legacy Windows splitting of quoted `OR` queries, then selects the JobSpy runtime for `agent-a-find` or browser-use runtime for `agent-c-browser`. |
 | `run.cmd` | Runs `run.ps1` with a process-local execution-policy bypass for locked-down Windows systems. |
 
 ## Data and side effects
@@ -415,8 +415,8 @@ The optional resume body exists only in process memory. Optional LLM scoring sen
 | `_organization_name(value)` | Normalizes organization object/string syntax. |
 | `_location_text(value)` | Flattens Place/PostalAddress values and arrays. |
 | `_salary_text(value)` | Flattens common MonetaryAmount/QuantitativeValue shapes. |
-| `_split_page_title(value)` | Provides a conservative title/company fallback. |
-| `_company_from_markdown(url, markdown)` | Recovers a direct-ATS company name from employer logo alt text or URL slug. |
+| `_split_page_title(value)` | Provides a conservative title/company fallback and parses HRMDirect's `Careers At` convention. |
+| `_company_from_markdown(url, markdown)` | Recovers a direct-ATS company name from employer logo text, Greenhouse path, or safe HRMDirect tenant subdomain. |
 | `infer_work_mode(location, description)` | Classifies remote, hybrid, onsite, or unknown from stated text. |
 | `infer_required_years(description)` | Extracts the lowest explicit experience requirement. |
 | `_normalize_liveness_text(value)` | Normalizes quotes and accents before testing posting-closure banners. |
@@ -483,7 +483,7 @@ The optional resume body exists only in process memory. Optional LLM scoring sen
 | `configure_logging(path, verbose)` | Configures file logging and optional stderr debug output. |
 | `normalize_space(value)` | Collapses whitespace safely. |
 | `normalize_term(value)` | Case-folds and strips matching punctuation. |
-| `canonical_url(url)` | Removes tracking/fragments and normalizes scheme, host, and path. |
+| `canonical_url(url)` | Removes tracking/fragments, normalizes scheme/host/path, and identifies HRMDirect postings by `req`/`id` instead of location-specific variants. |
 | `stable_id(*parts)` | Creates a deterministic 16-character SHA-256-based ID. |
 | `unique_preserving_order(values)` | Case-insensitively deduplicates strings. |
 | `redact_secrets(value)` | Masks common API-key shapes in error/log text. |
