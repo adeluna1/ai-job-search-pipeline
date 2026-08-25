@@ -30,6 +30,13 @@ Job searches often scatter discovery, resume comparison, notes, and application 
 9. Produces a complete current-run HTML/CSV/JSON audit plus a separate verified-only shortlist. Every unique candidate is categorized as `verified`, `manual_verification_required`, or `excluded`; historical benchmarks never count toward current-run totals.
 10. Coordinates a recruiter agent, an independent verifier, and a browser-use application assistant in Paperclip; every browser action is bound to the exact packet hash, job URL, and approved action.
 
+## Visual overview
+
+![Pipeline architecture](docs/images/pipeline-architecture.svg)
+
+![Sample interactive dashboard](docs/images/dashboard-preview.svg)
+
+The dashboard image uses synthetic sample data and contains no personal information.
 ## Quick start on Windows
 
 Requirements: PowerShell, Python 3.10+, and internet access.
