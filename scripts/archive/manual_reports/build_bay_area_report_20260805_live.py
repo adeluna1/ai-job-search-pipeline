@@ -163,7 +163,7 @@ def _find_source_item(items: list[dict], company: str, title: str) -> dict:
 
 def build() -> tuple[Path, Path]:
     profile = json.loads((ROOT / "config" / "profile.json").read_text(encoding="utf-8"))
-    resume_text = extract_docx_text(Path(r"C:\Users\acdde\Downloads\Albert Deluna ResumeV1.docx"))
+    resume_text = extract_docx_text(Path(r"C:\path\to\resume.docx"))
     source_items = _source_jobs()
     records: list[dict] = []
 

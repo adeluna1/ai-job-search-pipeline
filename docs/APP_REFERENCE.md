@@ -70,7 +70,7 @@ Verified active Job ----> SQLite deduplication and application state
 Deterministic 5-part score ----> optional bounded LLM score blend
       |
       v
-Interactive HTML shortlist + CSV export
+Complete current-run HTML/CSV/JSON audit + verified-only shortlist
       |
       v
 Agent A freshness/source triage
@@ -141,7 +141,7 @@ Reads at most 10 current-run jobs and scores, validates each posting, rechecks l
 
 ### `agent-a-find [--query TEXT] [--location TEXT] [--site BOARD] [--hours-old N] [--max-results N]`
 
-Runs Agent A's optimized discovery boundary. Each board is attempted once per exact requested location. Captured HTTP 400/403 errors open a run-scoped circuit breaker; missing coverage routes through WebClaw and the optional authenticated read-only browser. Direct discovery runs per requested title family and per trusted ATS family. Candidates are deduplicated before live resolution and classified as `verified`, `manual_verification_required`, or `rejected`. Manual leads are visible in the interactive report but can never enter Agent B or Agent C. Verified jobs receive local posting-confidence, repost, and cross-listing evidence before storage; these fields do not change the resume score. Only the current run is resume-ranked and exported, with a hard maximum of 10. The full audit, dispositions, counts, and selected IDs are written to `data/agent_a_discovery.json`.
+Runs Agent A's optimized discovery boundary. Each board is attempted once per exact requested location. Captured HTTP 400/403 errors open a run-scoped circuit breaker; missing coverage routes through WebClaw and the optional authenticated read-only browser. Direct discovery runs per requested title family and per trusted ATS family. Candidates are deduplicated before live resolution and classified as `verified`, `manual_verification_required`, or `excluded`. Every unique current-run candidate remains visible in the main HTML/CSV/JSON audit; source aliases and exact exclusion reasons are retained. Manual and excluded records can never enter Agent B or Agent C. Verified jobs receive local posting-confidence, repost, and cross-listing evidence before storage; these fields do not change the resume score. Only verified current-run jobs are resume-ranked for the Agent B shortlist, with a hard maximum of 10. The full audit, reconciled counts, historical-comparison separation, and selected IDs are written to `data/agent_a_discovery.json`.
 
 ### `applied-import FILE.json`
 
@@ -397,7 +397,7 @@ The optional resume body exists only in process memory. Optional LLM scoring sen
 | `WebClawClient._resolve_binary(explicit)` | Searches CLI flag, `WEBCLAW_BIN`, local tools, and PATH in order. |
 | `WebClawClient._run(args, stdin_text, timeout)` | Runs the process, keeps stdout machine-readable, logs redacted stderr, and raises concise failures. |
 | `WebClawClient.version()` | Calls `webclaw --version`. |
-| `WebClawClient.search(...)` | Calls the Serper-backed `search` subcommand and validates its result array. |
+| `WebClawClient.search(...)` | Calls the Tavily-backed search API and validates its result array. |
 | `WebClawClient.scrape(url)` | Calls standard JSON extraction with main-content filtering. |
 | `WebClawClient.probe(url, max_bytes)` | Fetches the exact application URL with no-cache headers, follows redirects, and returns final URL/status/body evidence for the live gate. |
 | `WebClawClient.extract_json_from_text(...)` | Calls `--stdin --extract-json @schema` with optional provider/model selection. |
@@ -498,7 +498,7 @@ The optional resume body exists only in process memory. Optional LLM scoring sen
 
 ## Failure behavior
 
-- Search without `SERPER_API_KEY`: WebClaw error is surfaced without printing a key.
+- Search without `TAVILY_API_KEY`: WebClaw error is surfaced without printing a key.
 - One job page fails: the other jobs continue; the failed URL is logged.
 - Job lacks JSON-LD: metadata and extracted main content are used.
 - Optional LLM unavailable: deterministic result remains final and the AI reason records the failure.

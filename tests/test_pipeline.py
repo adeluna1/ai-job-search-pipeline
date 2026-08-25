@@ -24,6 +24,10 @@ from job_pipeline.candidate_triage import (
     classify_resolution_failure,
     deduplicate_candidates,
     manual_disposition,
+    reconcile_dispositions,
+    rejected_disposition,
+    url_evidence,
+    verified_disposition,
 )
 from job_pipeline.cli import (
     _export,
@@ -38,6 +42,7 @@ from job_pipeline.discovery_fallback import (
     direct_application_domain,
     direct_ats_discovery,
     is_webclaw_verified,
+    recover_employer_application,
     resolve_employer_application,
     verify_discovered_jobs,
     webclaw_fallback_discovery,
@@ -64,7 +69,7 @@ from job_pipeline.posting_intelligence import (
     enrich_jobs_with_posting_intelligence,
     fingerprint_similarity,
 )
-from job_pipeline.report import export_reports
+from job_pipeline.report import export_candidate_audit, export_reports
 from job_pipeline.role_scope import evaluate_role_scope, is_manual_review_role
 from job_pipeline.resume import redact_contact_details, resume_terms
 from job_pipeline.storage import JobStore
@@ -417,9 +422,9 @@ class PipelineTests(unittest.TestCase):
         }
         job = replace(job_from_fixture(self.fixtures[0]), raw=raw)
         match = score_job(job, self.profile)
-        finding = RecruiterAgent().inspect(job, fresh_days=30)
+        finding = RecruiterAgent().inspect(job, fresh_days=3650)
         analysis = MatchAnalystAgent().analyze(
-            job, match, finding, threshold=72, fresh_days=30
+            job, match, finding, threshold=72, fresh_days=3650
         )
         self.assertEqual(analysis.recommendation, "review")
         self.assertEqual(analysis.score, match.final_score)
@@ -717,8 +722,8 @@ class PipelineTests(unittest.TestCase):
         """Exercise A/B/C offline and ensure Agent C cannot claim external submission."""
         job = job_from_fixture(self.fixtures[0])
         match = score_job(job, self.profile)
-        finding = RecruiterAgent().inspect(job, fresh_days=30)
-        analysis = MatchAnalystAgent().analyze(job, match, finding, threshold=72, fresh_days=30)
+        finding = RecruiterAgent().inspect(job, fresh_days=3650)
+        analysis = MatchAnalystAgent().analyze(job, match, finding, threshold=72, fresh_days=3650)
         self.assertTrue(finding.active)
         self.assertEqual(analysis.recommendation, "apply")
         application_profile = {
@@ -906,6 +911,39 @@ class PipelineTests(unittest.TestCase):
             ]
         )
 
+    def test_jobspy_times_out_one_board_without_blocking_the_run(self) -> None:
+        """A stalled provider call returns promptly and becomes fallback-eligible."""
+        import time
+
+        def stalled_scrape(**kwargs):
+            time.sleep(1)
+            return []
+
+        source = JobSpySource(
+            scraper=stalled_scrape,
+            board_timeout_seconds=0.1,
+        )
+        started = time.monotonic()
+        jobs = source.search(
+            "Recruiting Coordinator",
+            "San Francisco, California",
+            24,
+            5,
+            ["linkedin"],
+        )
+
+        self.assertEqual(jobs, [])
+        self.assertLess(time.monotonic() - started, 0.6)
+        self.assertEqual(
+            source.last_diagnostics["status_by_site"]["linkedin"],
+            "timed_out",
+        )
+        self.assertIn("linkedin", source.last_diagnostics["fallback_sites"])
+        self.assertTrue(
+            source.last_diagnostics["circuit_breakers"]["linkedin"]["open"]
+        )
+
+
     def test_direct_domain_accepts_joined_employer_name_and_trusted_ats(self) -> None:
         """Recognize legitimate joined company domains without weakening ATS suffix checks."""
         employer = direct_application_domain(
@@ -956,7 +994,7 @@ class PipelineTests(unittest.TestCase):
         jobs, diagnostics = direct_ats_discovery(
             DirectAtsWebClaw(),
             "Recruiting Coordinator",
-            ["San Francisco, California", "Remote, United States"],
+            ["San Francisco Bay Area, California", "Remote, United States"],
             168,
             10,
         )
@@ -970,8 +1008,13 @@ class PipelineTests(unittest.TestCase):
             },
         )
         self.assertTrue(all(
-            key.startswith("coordination:")
+            key.startswith("recruiting_coordination:")
             for key in diagnostics["queries_by_title_group_and_ats"]
+        ))
+        self.assertIn("Mountain View, California", diagnostics["search_locations"])
+        self.assertTrue(all(
+            '"Mountain View, California"' in query
+            for query in diagnostics["queries_by_group"].values()
         ))
         self.assertEqual(len(jobs), 1)
         self.assertEqual(jobs[0].url, ats_url)
@@ -979,6 +1022,82 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(jobs[0].raw["structured_ats"]["source_platform"], "ashby")
         self.assertEqual(jobs[0].raw["structured_ats"]["active_status"], "active")
         self.assertEqual(jobs[0].raw["structured_ats"]["final_application_url"], ats_url)
+
+    def test_live_greenhouse_feed_finds_unindexed_talent_acquisition_associate(self) -> None:
+        """Poll a configured official board and retain its matching active job."""
+        job_url = "https://job-boards.greenhouse.io/densityai/jobs/4371350009"
+        now = datetime.now(timezone.utc).isoformat()
+        description = ("Responsibilities: coordinate recruiting, sourcing, and interview scheduling. "
+                       "Qualifications: one year of recruiting experience. ") * 20
+
+        class GreenhouseFeedWebClaw:
+            def search(self, query, num=8, country="us", language="en"):
+                return []
+
+            def scrape(self, url):
+                return {
+                    "metadata": {"title": "Talent Acquisition Associate | DensityAI"},
+                    "content": {"plain_text": description},
+                    "structured_data": [{
+                        "@type": "JobPosting",
+                        "title": "Talent Acquisition Associate",
+                        "hiringOrganization": {"name": "DensityAI"},
+                        "description": description,
+                        "jobLocation": {
+                            "@type": "Place",
+                            "address": {
+                                "addressLocality": "Mountain View",
+                                "addressRegion": "CA",
+                            },
+                        },
+                    }],
+                }
+
+            def probe(self, url, max_bytes=524_288):
+                if "boards-api.greenhouse.io" in url:
+                    return {
+                        "status": 200,
+                        "final_url": url,
+                        "body": json.dumps({
+                            "jobs": [{
+                                "title": "Talent Acquisition Associate",
+                                "absolute_url": job_url,
+                                "updated_at": now,
+                                "location": {"name": "Mountain View, California"},
+                            }],
+                        }),
+                    }
+                return {
+                    "status": 200,
+                    "final_url": job_url,
+                    "content_type": "text/html",
+                    "body": description,
+                }
+
+        jobs, diagnostics = direct_ats_discovery(
+            GreenhouseFeedWebClaw(),
+            '"Talent Acquisition Associate"',
+            ["San Francisco Bay Area, California"],
+            168,
+            10,
+            greenhouse_boards=["densityai"],
+        )
+
+        self.assertEqual(len(jobs), 1, diagnostics)
+        self.assertEqual(jobs[0].url, job_url)
+        self.assertEqual(jobs[0].posted_date, now)
+        self.assertEqual(
+            jobs[0].raw["verification_provenance"]["posted_date"],
+            "official_greenhouse_updated_at",
+        )
+        self.assertEqual(jobs[0].title, "Talent Acquisition Associate")
+        self.assertTrue(is_webclaw_verified(jobs[0]))
+        self.assertEqual(
+            diagnostics["title_groups"]["junior_recruiter"],
+            ["talent acquisition associate"],
+        )
+        self.assertEqual(diagnostics["live_greenhouse"]["jobs_seen"], 1)
+        self.assertEqual(diagnostics["live_greenhouse"]["matching_recent_jobs"], 1)
 
     def test_resolution_follows_safe_redirect_to_final_ats_job(self) -> None:
         """Verify the final ATS page instead of rejecting a legitimate job redirect."""
@@ -1604,13 +1723,13 @@ class PipelineTests(unittest.TestCase):
         """Use weak external ATS evidence as a review gate, never as a silent rejection."""
         job = job_from_fixture(self.fixtures[0])
         match = score_job(job, self.profile)
-        finding = RecruiterAgent().inspect(job, fresh_days=30)
+        finding = RecruiterAgent().inspect(job, fresh_days=3650)
         analysis = MatchAnalystAgent().analyze(
             job,
             match,
             finding,
             threshold=72,
-            fresh_days=30,
+            fresh_days=3650,
             resume_matcher={"overall_score": 45, "missing_keywords": ["Workday"]},
         )
         self.assertEqual(analysis.recommendation, "review")
@@ -1626,6 +1745,15 @@ class PipelineTests(unittest.TestCase):
             with JobStore(database) as store:
                 store.upsert_job(job)
                 store.upsert_match(score_job(job, self.profile))
+            discovery = ROOT / "data" / "agent_a_discovery.json"
+            prior_discovery = discovery.read_text(encoding="utf-8") if discovery.exists() else None
+            write_json(discovery, {
+                "locations": [],
+                "hours_old": 720,
+                "diagnostics": {
+                    "candidate_dispositions": [verified_disposition(job, 80.0)],
+                },
+            })
 
             class DownMatcher:
                 def health(self):
@@ -1636,15 +1764,21 @@ class PipelineTests(unittest.TestCase):
                 live=False,
                 database=database,
                 job_id=[job.id],
-                fresh_days=30,
+                fresh_days=3650,
                 resume_matcher=True,
                 resume=ROOT / "README.md",
                 allow_resume_upload=True,
                 resume_matcher_url="http://127.0.0.1:3000/api/v1",
                 output=output,
             )
-            with patch("job_pipeline.cli.ResumeMatcherClient", return_value=DownMatcher()):
-                self.assertEqual(command_agent_b(args, ROOT), 0)
+            try:
+                with patch("job_pipeline.cli.ResumeMatcherClient", return_value=DownMatcher()):
+                    self.assertEqual(command_agent_b(args, ROOT), 0)
+            finally:
+                if prior_discovery is None:
+                    discovery.unlink(missing_ok=True)
+                else:
+                    discovery.write_text(prior_discovery, encoding="utf-8")
             reviews = json.loads(output.read_text(encoding="utf-8"))
         self.assertEqual(len(reviews["records"]), 1)
         self.assertEqual(reviews["records"][0]["analysis"]["recommendation"], "review")
@@ -1948,6 +2082,360 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("disability_status", catalog["manual_only_topics"])
         self.assertEqual(catalog["unknown_field_policy"], "pause_and_request_human_answer")
 
+
+    def test_current_run_audit_reconciles_without_historical_padding(self) -> None:
+        """Every unique current-run candidate appears once; historical 27 is not counted."""
+        verified_job = job_from_fixture({
+            **self.fixtures[0],
+            "url": "https://jobs.ashbyhq.com/acme/verified-role",
+        })
+        manual_job = job_from_fixture({
+            **self.fixtures[0],
+            "url": "https://www.linkedin.com/jobs/view/123",
+            "company": "Manual Co",
+        })
+        excluded_job = job_from_fixture({
+            **self.fixtures[0],
+            "url": "https://evil.example/role",
+            "company": "Excluded Co",
+        })
+        applied_job = job_from_fixture({
+            **self.fixtures[0],
+            "url": "https://jobs.lever.co/applied-co/recruiting-role",
+            "company": "Applied Co",
+        })
+        records, summary = reconcile_dispositions([
+            verified_disposition(verified_job, 88.0),
+            manual_disposition(manual_job, "HTTP 403 access challenge"),
+            rejected_disposition(excluded_job, "unsafe_or_suspicious", "Lookalike URL."),
+            rejected_disposition(applied_job, "already_applied", "Already applied; suppressed from shortlist."),
+        ], duplicate_source_records=2)
+        self.assertEqual(len(records), 4)
+        self.assertEqual(summary["current_run_candidates_discovered"], 6)
+        self.assertEqual(summary["unique_current_run_candidates"], 4)
+        self.assertEqual(summary["verified"], 1)
+        self.assertEqual(summary["manual_verification_required"], 1)
+        self.assertEqual(summary["excluded"], 2)
+        self.assertEqual(summary["duplicates"], 2)
+        self.assertEqual(summary["already_applied"], 1)
+        self.assertNotEqual(summary["unique_current_run_candidates"], 27)
+        self.assertEqual(
+            summary["unique_current_run_candidates"],
+            summary["verified"] + summary["manual_verification_required"] + summary["excluded"],
+        )
+
+        applied = next(record for record in records if record["failure_category"] == "already_applied")
+        self.assertEqual(applied["disposition"], "excluded")
+        self.assertFalse(applied["eligible_for_agent_b"])
+    def test_candidate_audit_exports_every_category_and_labeled_urls(self) -> None:
+        """HTML, CSV, and JSON show all categories, warning, filters, and URL labels."""
+        direct = job_from_fixture({
+            **self.fixtures[0],
+            "url": "https://jobs.ashbyhq.com/acme/verified-role",
+        })
+        direct = replace(direct, raw={
+            "discovery_evidence": {
+                "source_urls": [direct.url, "https://www.linkedin.com/jobs/view/123"],
+            }
+        })
+        manual_job = job_from_fixture({
+            **self.fixtures[0],
+            "url": "https://www.glassdoor.com/job-listing/example?jl=9",
+            "company": "Manual Co",
+        })
+        excluded_job = job_from_fixture({
+            **self.fixtures[0],
+            "url": "https://greenhouse.io.evil.example/jobs/9",
+            "company": "Excluded Co",
+        })
+        records, summary = reconcile_dispositions([
+            verified_disposition(direct, 90.0),
+            manual_disposition(manual_job, "Access challenge"),
+            rejected_disposition(excluded_job, "unsafe_or_suspicious", "ATS lookalike rejected."),
+        ], duplicate_source_records=1)
+        with tempfile.TemporaryDirectory() as temp:
+            paths = export_candidate_audit(
+                records,
+                summary,
+                Path(temp),
+                historical_comparison={"current_run_candidates_discovered": 27},
+            )
+            html_text = paths["html"].read_text(encoding="utf-8")
+            csv_text = paths["csv"].read_text(encoding="utf-8-sig")
+            self.assertTrue((Path(temp) / "job_matches_verified.html").exists())
+            self.assertTrue((Path(temp) / "job_matches_historical_comparison.json").exists())
+            payload = json.loads(paths["json"].read_text(encoding="utf-8"))
+            self.assertTrue((Path(temp) / "job_matches_manual_verification.html").exists())
+            self.assertTrue((Path(temp) / "job_matches_excluded.json").exists())
+        self.assertEqual(len(payload["records"]), 3)
+        self.assertEqual(payload["summary"], summary)
+        self.assertIn("All current-run candidates", html_text)
+        self.assertIn("Already applied", html_text)
+        self.assertIn("Duplicates", html_text)
+        self.assertIn("This job has not been fully verified", html_text)
+        self.assertIn('value="recruiting_leads" selected', html_text)
+        self.assertIn("Rejected source noise remains available", html_text)
+        self.assertIn("filter();", html_text)
+        self.assertIn("Historical comparison", html_text)
+        self.assertIn("Verified direct application link", html_text)
+        self.assertIn("Original board link", html_text)
+        self.assertIn("Unverified link requiring manual review", csv_text)
+
+    def test_duplicate_aliases_group_under_one_candidate(self) -> None:
+        """Duplicate source events merge into one candidate with both source aliases."""
+        job = job_from_fixture({
+            **self.fixtures[0],
+            "url": "https://jobs.ashbyhq.com/acme/role",
+        })
+        primary = verified_disposition(job, 88.0)
+        alias = dict(primary)
+        alias["source_url"] = "https://www.linkedin.com/jobs/view/88"
+        alias["source_urls"] = [alias["source_url"]]
+        records, summary = reconcile_dispositions([primary, alias], duplicate_source_records=1)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(summary["unique_current_run_candidates"], 1)
+        self.assertEqual(summary["duplicates"], 1)
+        labels = {item["label"] for item in records[0]["url_evidence"]}
+        self.assertIn("verified_direct_application_link", labels)
+        self.assertIn("original_board_link", labels)
+
+    def test_agent_b_rejects_manual_and_excluded_dispositions(self) -> None:
+        """Only a current-run verified disposition may enter Agent B."""
+        job = job_from_fixture(self.fixtures[0])
+        for disposition in (
+            manual_disposition(job, "Access challenge"),
+            rejected_disposition(job, "already_applied", "Already applied."),
+        ):
+            payload = {"diagnostics": {"candidate_dispositions": [disposition]}}
+            with patch("job_pipeline.cli.read_json", return_value=payload):
+                args = SimpleNamespace(min_score=None, live=False, database=Path("missing"), job_id=[job.id], fresh_days=7, resume_matcher=False, output=None)
+                with self.assertRaisesRegex(ValueError, "categorized as verified"):
+                    command_agent_b(args, ROOT)
+    def test_agent_b_empty_selection_cannot_fall_back_to_history(self) -> None:
+        """An empty handoff must never score every historical database job."""
+        payload = {"diagnostics": {"candidate_dispositions": []}}
+        with patch("job_pipeline.cli.read_json", return_value=payload):
+            args = SimpleNamespace(min_score=None, live=False, database=Path("missing"), job_id=[], fresh_days=7, resume_matcher=False, output=None)
+            with self.assertRaisesRegex(ValueError, "explicit current-run verified job ID"):
+                command_agent_b(args, ROOT)
+
+
+    def test_board_lookalike_is_never_labeled_direct(self) -> None:
+        """Board and lookalike URLs cannot receive the verified-direct label."""
+        evidence = url_evidence([
+            "https://www.linkedin.com/jobs/view/1",
+            "https://greenhouse.io.evil.example/jobs/1",
+        ], verified_url="https://www.linkedin.com/jobs/view/1")
+        self.assertEqual(evidence[0]["label"], "original_board_link")
+        self.assertEqual(evidence[1]["label"], "unverified_link_requiring_manual_review")
+
+    def _recovery_fixture(self):
+        description = "Recruiting coordination responsibilities and qualifications. " * 20
+        hint = job_from_fixture({
+            **self.fixtures[0],
+            "url": "https://www.linkedin.com/jobs/view/987654",
+            "title": "Recruiting Coordinator",
+            "company": "Example Robotics",
+            "location": "San Francisco, CA",
+            "posted_date": datetime.now(timezone.utc).date().isoformat(),
+            "description": description,
+        })
+        employer_url = "https://job-boards.greenhouse.io/examplerobotics/jobs/987654"
+        payload = {
+            "metadata": {"title": "Recruiting Coordinator | Example Robotics"},
+            "content": {"plain_text": description},
+            "structured_data": [{
+                "@type": "JobPosting",
+                "title": hint.title,
+                "hiringOrganization": {"name": hint.company},
+                "jobLocation": {"address": {
+                    "addressLocality": "San Francisco",
+                    "addressRegion": "CA",
+                    "addressCountry": "US",
+                }},
+                "datePosted": hint.posted_date,
+                "description": description,
+            }],
+        }
+        return hint, employer_url, payload
+
+    def test_linkedin_candidate_recovers_through_exact_ats_page(self) -> None:
+        """An exact LinkedIn identity can recover only through a verified ATS page."""
+        hint, employer_url, payload = self._recovery_fixture()
+        queries = []
+
+        class RecoveryWebClaw:
+            def search(self, query, num=8, country="us", language="en"):
+                queries.append(query)
+                return [{"link": employer_url}]
+
+            def scrape(self, url):
+                return payload
+
+        recovered, diagnostics = recover_employer_application(RecoveryWebClaw(), hint)
+        self.assertEqual(recovered.url, employer_url)
+        self.assertTrue(is_webclaw_verified(recovered))
+        self.assertIn('"Example Robotics"', queries[0])
+        self.assertIn('"Recruiting Coordinator"', queries[0])
+        self.assertEqual(diagnostics["resolved_url"], employer_url)
+
+    def test_high_fit_manual_candidate_is_retryable_without_score_change(self) -> None:
+        """A 72+ manual lead can be retried while retaining its preliminary score."""
+        hint, employer_url, payload = self._recovery_fixture()
+        manual = manual_disposition(
+            hint,
+            "Employer application page could not be confirmed.",
+            failure_category="missing_employer_link",
+            preliminary_score=88.0,
+        )
+
+        class RecoveryWebClaw:
+            def search(self, query, num=8, country="us", language="en"):
+                return [{"link": employer_url}]
+
+            def scrape(self, url):
+                return payload
+
+        before = score_job(hint, self.profile, "")
+        recovered, _ = recover_employer_application(RecoveryWebClaw(), hint)
+        after = score_job(hint, self.profile, "")
+        self.assertEqual(manual["preliminary_resume_fit_score"], 88.0)
+        self.assertEqual(before.final_score, after.final_score)
+
+    def test_duplicate_browser_url_consumes_one_logical_read(self) -> None:
+        """Per-run browser caching avoids rereading an identical detail URL."""
+        page_text_reads = 0
+        description = "Recruiting responsibilities and qualifications. " * 20
+        url = "https://www.glassdoor.com/job-listing/example?jl=123"
+
+        def transport(method, path, body, headers):
+            nonlocal page_text_reads
+            if path == "/status":
+                return {
+                    "ok": True,
+                    "activeTab": 6,
+                    "tabCount": 8,
+                    "tabs": [{
+                        "id": 6,
+                        "platform": "glassdoor",
+                        "url": url,
+                        "title": "Recruiting Coordinator | Example Robotics",
+                        "pageReady": True,
+                    }],
+                }
+            if path == "/page/text":
+                page_text_reads += 1
+                return {"ok": True, "result": {"text": description, "len": len(description)}}
+            return {"ok": True}
+
+        browser = AgentWebBrowserClient(token="a" * 32, transport=transport)
+        first = browser.read_job_page(url, "glassdoor", poll_attempts=1, poll_delay=0)
+        second = browser.read_job_page(url, "glassdoor", poll_attempts=1, poll_delay=0)
+        self.assertEqual(first, second)
+        self.assertEqual(page_text_reads, 1)
+        self.assertEqual(browser.run_diagnostics()["duplicate_browser_requests_avoided"], 1)
+
+    def test_recovery_rejects_employer_and_title_mismatch(self) -> None:
+        """Search similarity cannot promote a different employer or job title."""
+        hint, employer_url, payload = self._recovery_fixture()
+        mismatch = json.loads(json.dumps(payload))
+        mismatch["structured_data"][0]["title"] = "Senior Software Engineer"
+        mismatch["structured_data"][0]["hiringOrganization"]["name"] = "Other Company"
+
+        class MismatchWebClaw:
+            def search(self, query, num=8, country="us", language="en"):
+                return [{"link": employer_url}]
+
+            def scrape(self, url):
+                return mismatch
+
+        with self.assertRaisesRegex(WebClawError, "mismatch"):
+            recover_employer_application(MismatchWebClaw(), hint)
+
+    def test_recovery_rejects_lookalike_employer_domain(self) -> None:
+        """A lookalike hostname remains invalid even when its content looks complete."""
+        hint, _, payload = self._recovery_fixture()
+        lookalike = "https://greenhouse.io.evil.example/jobs/987654"
+
+        class LookalikeWebClaw:
+            def search(self, query, num=8, country="us", language="en"):
+                return [{"link": lookalike}]
+
+            def scrape(self, url):
+                return payload
+
+        with self.assertRaises(WebClawError):
+            recover_employer_application(LookalikeWebClaw(), hint)
+
+    def test_recovery_rejects_closed_page(self) -> None:
+        """A recovered URL with closure text remains excluded from verification."""
+        hint, employer_url, payload = self._recovery_fixture()
+        closed = json.loads(json.dumps(payload))
+        closed["structured_data"][0]["description"] = (
+            "This job is no longer accepting applications. Responsibilities and qualifications. " * 12
+        )
+
+        class ClosedRecoveryWebClaw:
+            def search(self, query, num=8, country="us", language="en"):
+                return [{"link": employer_url}]
+
+            def scrape(self, url):
+                return closed
+
+        with self.assertRaisesRegex(WebClawError, "closed|no longer"):
+            recover_employer_application(ClosedRecoveryWebClaw(), hint)
+
+    def test_ontario_job_is_not_bay_area(self) -> None:
+        """Canadian posting evidence cannot inherit the requested California location."""
+        job = job_from_fixture({
+            **self.fixtures[0],
+            "location": "Toronto, Ontario, Canada",
+            "work_mode": "onsite",
+        })
+        decision = evaluate_geography(job, ["San Francisco Bay Area"])
+        self.assertFalse(decision.eligible)
+        self.assertIn("Toronto, Ontario, Canada", decision.reason)
+
+    def test_browser_budget_exhaustion_stays_manual(self) -> None:
+        """Allowance exhaustion is visible manual review, never a hard exclusion."""
+        disposition, category = classify_resolution_failure(
+            "Agent Web Browser hourly read limit allowance exhausted"
+        )
+        job = job_from_fixture(self.fixtures[0])
+        record = manual_disposition(job, "hourly read limit allowance exhausted")
+        self.assertEqual(disposition, "manual_verification_required")
+        self.assertEqual(category, "browser_budget_exhausted")
+        self.assertEqual(record["disposition"], "manual_verification_required")
+        self.assertFalse(record["eligible_for_agent_b"])
+        self.assertFalse(record["eligible_for_agent_c"])
+
+    def test_recovery_does_not_bypass_agent_boundaries(self) -> None:
+        """Recovery creates Agent B eligibility only; Agent C still needs live B approval."""
+        hint, employer_url, payload = self._recovery_fixture()
+
+        class RecoveryWebClaw:
+            def search(self, query, num=8, country="us", language="en"):
+                return [{"link": employer_url}]
+
+            def scrape(self, url):
+                return payload
+
+        recovered, _ = recover_employer_application(RecoveryWebClaw(), hint)
+        disposition = verified_disposition(recovered, 88.0)
+        self.assertTrue(disposition["eligible_for_agent_b"])
+        self.assertFalse(disposition["eligible_for_agent_c"])
+        with self.assertRaises(ValueError):
+            build_agent_c_handoff({
+                "job_id": recovered.id,
+                "url": recovered.url,
+                "geography_eligible": True,
+                "analysis": {
+                    "recommendation": "apply",
+                    "live_verified": False,
+                    "direct_domain_verified": True,
+                    "freshness": {"fresh": True},
+                },
+            })
 
 if __name__ == "__main__":
     unittest.main()

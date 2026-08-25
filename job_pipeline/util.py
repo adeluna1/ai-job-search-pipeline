@@ -35,6 +35,22 @@ def write_json(path: Path, value: Any) -> None:
         handle.write("\n")
 
 
+def write_json_atomic(path: Path, value: Any) -> None:
+    """Atomically replace a JSON file so interrupted checkpoints stay readable."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+            json.dump(value, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
 def load_dotenv(path: Path) -> None:
     """Load simple KEY=VALUE entries without replacing existing environment values."""
     if not path.exists():

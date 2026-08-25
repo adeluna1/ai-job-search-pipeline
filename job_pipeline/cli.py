@@ -9,6 +9,7 @@ import os
 import subprocess
 import sys
 from copy import deepcopy
+from dataclasses import replace
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Iterable
@@ -35,13 +36,17 @@ from .candidate_triage import (
     deduplicate_candidates,
     job_from_resolution_error,
     manual_disposition,
+    reconcile_dispositions,
     rejected_disposition,
     verified_disposition,
 )
 from .discovery_fallback import (
+    RECOVERY_FAILURE_CATEGORIES,
     agent_web_browser_board_discovery,
     direct_ats_discovery,
     is_webclaw_verified,
+    recover_employer_application,
+    requested_title_family_queries,
     verify_discovered_jobs,
     webclaw_fallback_discovery,
 )
@@ -61,7 +66,7 @@ from .handoff import build_agent_c_handoff, validate_agent_c_handoff
 from .jobs import Job, job_from_fixture, normalize_webclaw_job, validate_job
 from .lifecycle import APPLICATION_STATES, SEARCH_SUPPRESSION_STATES
 from .matching import apply_ai_score, score_job
-from .report import export_reports
+from .report import export_candidate_audit, export_reports
 from .posting_intelligence import enrich_jobs_with_posting_intelligence
 from .role_scope import (
     evaluate_role_scope,
@@ -71,7 +76,7 @@ from .role_scope import (
 )
 from .resume import ResumeError, extract_docx_text, redact_contact_details, resume_context, resume_terms
 from .storage import JobStore
-from .util import canonical_url, configure_logging, load_dotenv, read_json, unique_preserving_order, utc_now, write_json
+from .util import canonical_url, configure_logging, load_dotenv, normalize_term, read_json, stable_id, unique_preserving_order, utc_now, write_json, write_json_atomic
 from .webclaw import WebClawClient, WebClawError
 
 
@@ -357,7 +362,7 @@ def command_doctor(args: argparse.Namespace, root: Path) -> int:
         print(f"WebClaw: {_client(root, args).version()}")
     except WebClawError as exc:
         print(f"WebClaw: ERROR ({exc})")
-    print(f"SERPER_API_KEY: {'configured' if os.environ.get('SERPER_API_KEY') else 'not configured'}")
+    print(f"TAVILY_API_KEY: {'configured' if os.environ.get('TAVILY_API_KEY') else 'not configured'}")
     providers = [name for name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY") if os.environ.get(name)]
     print("LLM providers: " + (", ".join(providers) if providers else "no cloud key detected; Ollama may still be available"))
     jobspy_python = root / "tools" / "jobspy-runtime" / "Scripts" / "python.exe"
@@ -610,7 +615,7 @@ def command_run(args: argparse.Namespace, root: Path) -> int:
     search_config = read_json(root / "config" / "searches.json")
     urls = discover_urls(client, search_config, args.max_jobs)
     if not urls:
-        print("No job URLs were discovered. Check SERPER_API_KEY and search queries.", file=sys.stderr)
+        print("No job URLs were discovered. Check TAVILY_API_KEY and search queries.", file=sys.stderr)
         return 2
     database = root / "data" / "jobs.sqlite3"
     with JobStore(database) as store:
@@ -758,6 +763,64 @@ def command_agent_a(args: argparse.Namespace, root: Path) -> int:
     return 0
 
 
+HISTORICAL_CANDIDATE_BENCHMARK = {
+    "label": "Historical comparison - not included in current-run totals.",
+    "date": "2026-08-13",
+    "current_run_candidates_discovered": 27,
+    "note": "Reference benchmark only; never copied into a later run.",
+}
+
+
+def _write_current_run_candidate_audit(
+    root: Path,
+    diagnostics: dict[str, Any],
+    records: Iterable[dict[str, Any]],
+    *,
+    duplicate_source_records: int,
+) -> tuple[dict[str, Path], list[dict[str, Any]], dict[str, int]]:
+    """Reconcile and export one complete, current-run-only candidate audit."""
+    reconciled, summary = reconcile_dispositions(
+        records,
+        duplicate_source_records=duplicate_source_records,
+    )
+    diagnostics["candidate_dispositions"] = reconciled
+    prior_counts = dict(diagnostics.get("current_run_counts", {}))
+    recovery = dict(diagnostics.get("verification_recovery", {}))
+    browser_usage = dict(
+        diagnostics.get("agent_web_browser", {}).get("usage", {})
+    )
+    summary.update({
+        "total_source_leads": int(
+            prior_counts.get("source_leads", summary["current_run_candidates_discovered"])
+        ),
+        "initially_verified": int(recovery.get("initially_verified", 0)),
+        "recovery_candidates_attempted": int(recovery.get("attempted", 0)),
+        "candidates_promoted_by_recovery": int(recovery.get("promoted", 0)),
+        "duplicate_browser_requests_avoided": int(
+            browser_usage.get("duplicate_browser_requests_avoided", 0)
+        ),
+        "browser_logical_page_reads": int(browser_usage.get("logical_page_reads", 0)),
+        "browser_budget_exhausted": bool(browser_usage.get("budget_exhausted", False)),
+    })
+    diagnostics["current_run_counts"] = {
+        **prior_counts,
+        **summary,
+        "source_leads": summary["total_source_leads"],
+        "unique_candidates": summary["unique_current_run_candidates"],
+        "rejected": summary["excluded"],
+    }
+    diagnostics["historical_comparison"] = HISTORICAL_CANDIDATE_BENCHMARK
+    paths = export_candidate_audit(
+        reconciled,
+        summary,
+        root / "reports",
+        prefix="job_matches",
+        title="Complete current-run candidate report",
+        historical_comparison=HISTORICAL_CANDIDATE_BENCHMARK,
+    )
+    return paths, reconciled, summary
+
+
 def command_agent_a_find(args: argparse.Namespace, root: Path) -> int:
     """Run optimized discovery, WebClaw coverage fallback, and the verification gate."""
     if args.provider != "jobspy":
@@ -769,6 +832,45 @@ def command_agent_a_find(args: argparse.Namespace, root: Path) -> int:
     args.fresh_days = effective_fresh_days
     args.fresh_hours = max(1, int(args.hours_old))
     requested_sites = args.site or ["linkedin", "indeed", "glassdoor", "zip_recruiter"]
+    checkpoint_path = root / "data" / "agent_a_discovery_checkpoint.json"
+    checkpoint_key = stable_id(
+        args.query,
+        " | ".join(locations),
+        str(args.hours_old),
+        " | ".join(requested_sites),
+        args.country,
+    )
+    checkpoint: dict[str, Any] = {
+        "schema_version": 1,
+        "run_key": checkpoint_key,
+        "status": "running",
+        "created_at": utc_now(),
+        "updated_at": utc_now(),
+        "query": args.query,
+        "locations": locations,
+        "hours_old": args.hours_old,
+        "requested_sites": requested_sites,
+        "completed_batches": [],
+        "jobs": [],
+        "family_diagnostics": {},
+        "blocked_sites": [],
+        "blocked_status_by_site": {},
+    }
+    resumed_batches = 0
+    if checkpoint_path.exists():
+        try:
+            existing_checkpoint = read_json(checkpoint_path)
+            if (
+                existing_checkpoint.get("run_key") == checkpoint_key
+                and existing_checkpoint.get("status") == "running"
+            ):
+                checkpoint = existing_checkpoint
+                resumed_batches = len(checkpoint.get("completed_batches", []))
+        except (OSError, ValueError, json.JSONDecodeError):
+            LOGGER.warning("Ignoring an unreadable Agent A discovery checkpoint")
+    completed_batches = set(
+        str(value) for value in checkpoint.get("completed_batches", [])
+    )
     client = _client(root, args)
     profile = load_profile(root)
     resume_text = _resume_text(args)
@@ -830,24 +932,160 @@ def command_agent_a_find(args: argparse.Namespace, root: Path) -> int:
         except AgentWebBrowserError as exc:
             browser_diagnostics["reason"] = str(exc)
 
-    jobspy_jobs: list[Job] = []
+    jobspy_jobs: list[Job] = [
+        Job.from_dict(record)
+        for record in checkpoint.get("jobs", [])
+        if isinstance(record, dict)
+    ]
     fallback_jobs: list[Job] = []
     location_runs: dict[str, dict[str, Any]] = {}
     fallback_by_location: dict[str, dict[str, Any]] = {}
+    title_family_queries = requested_title_family_queries(args.query)
+    blocked_sites_for_run: set[str] = set(checkpoint.get("blocked_sites", []))
+    blocked_status_by_site: dict[str, str] = dict(
+        checkpoint.get("blocked_status_by_site", {})
+    )
     for location in locations:
-        provider = JobSpySource()
-        location_jobs = provider.search(
-            search_term=args.query,
-            location=location,
-            hours_old=args.hours_old,
-            results_wanted=args.results_wanted,
-            sites=requested_sites,
-            country=args.country,
-            glassdoor_location=args.glassdoor_location,
-        )
+        family_runs: dict[str, dict[str, Any]] = {}
+        location_jobs: list[Job] = []
+        for family, family_query in title_family_queries.items():
+            batch_key = f"{location}\u001f{family}"
+            if batch_key in completed_batches:
+                saved = checkpoint.get("family_diagnostics", {}).get(batch_key, {})
+                if isinstance(saved, dict):
+                    family_runs[family] = saved
+                continue
+            active_sites = [
+                site for site in requested_sites if site not in blocked_sites_for_run
+            ]
+            if not active_sites:
+                break
+            provider = JobSpySource(
+                board_timeout_seconds=args.board_timeout_seconds,
+            )
+            family_jobs = provider.search(
+                search_term=family_query,
+                location=location,
+                hours_old=args.hours_old,
+                results_wanted=args.results_wanted,
+                sites=active_sites,
+                country=args.country,
+                glassdoor_location=args.glassdoor_location,
+            )
+            location_jobs.extend(family_jobs)
+            family_diagnostics = deepcopy(provider.last_diagnostics)
+            family_runs[family] = family_diagnostics
+            for site, status in family_diagnostics.get("status_by_site", {}).items():
+                if str(status).startswith("blocked_") or status == "timed_out":
+                    blocked_sites_for_run.add(site)
+                    blocked_status_by_site[site] = str(status)
+            completed_batches.add(batch_key)
+            checkpoint.update({
+                "status": "running",
+                "updated_at": utc_now(),
+                "completed_batches": sorted(completed_batches),
+                "jobs": [job.to_dict() for job in [*jobspy_jobs, *location_jobs]],
+                "blocked_sites": sorted(blocked_sites_for_run),
+                "blocked_status_by_site": blocked_status_by_site,
+            })
+            checkpoint.setdefault("family_diagnostics", {})[
+                batch_key
+            ] = family_diagnostics
+            write_json_atomic(checkpoint_path, checkpoint)
         jobspy_jobs.extend(location_jobs)
-        location_diagnostics = deepcopy(provider.last_diagnostics)
-        location_fallback_sites = location_diagnostics.get("fallback_sites", [])
+
+        location_diagnostics: dict[str, Any] = {
+            "provider": "jobspy",
+            "requested_sites": requested_sites,
+            "title_family_queries": title_family_queries,
+            "title_family_runs": family_runs,
+            "query_locations_by_site": {
+                site: unique_preserving_order(
+                    str(run.get("query_locations_by_site", {}).get(site, ""))
+                    for run in family_runs.values()
+                    if run.get("query_locations_by_site", {}).get(site)
+                )
+                for site in requested_sites
+            },
+            "result_counts_by_site": {
+                site: sum(
+                    int(run.get("result_counts_by_site", {}).get(site, 0))
+                    for run in family_runs.values()
+                )
+                for site in requested_sites
+            },
+            "attempts_by_site": {
+                site: sum(
+                    int(run.get("attempts_by_site", {}).get(site, 0))
+                    for run in family_runs.values()
+                )
+                for site in requested_sites
+            },
+            "provider_errors": [
+                message
+                for run in family_runs.values()
+                for message in run.get("provider_errors", [])
+            ],
+            "normalization_errors": [
+                message
+                for run in family_runs.values()
+                for message in run.get("normalization_errors", [])
+            ],
+            "captured_board_logs": {
+                site: [
+                    message
+                    for run in family_runs.values()
+                    for message in run.get("captured_board_logs", {}).get(site, [])
+                ]
+                for site in requested_sites
+            },
+        }
+        status_by_site_for_location: dict[str, str] = {}
+        for site in requested_sites:
+            statuses = [
+                str(run.get("status_by_site", {}).get(site, "not_attempted"))
+                for run in family_runs.values()
+                if site in run.get("requested_sites", [])
+            ]
+            if site in blocked_sites_for_run:
+                status_by_site_for_location[site] = blocked_status_by_site.get(
+                    site, "blocked_run_circuit"
+                )
+            elif any(status == "ok" for status in statuses):
+                status_by_site_for_location[site] = "ok"
+            elif statuses and len(set(statuses)) == 1:
+                status_by_site_for_location[site] = statuses[0]
+            elif statuses:
+                status_by_site_for_location[site] = "degraded"
+            else:
+                status_by_site_for_location[site] = "not_attempted"
+        location_diagnostics["status_by_site"] = status_by_site_for_location
+        location_diagnostics["blocked_sites"] = sorted(blocked_sites_for_run)
+        location_diagnostics["circuit_breakers"] = {
+            site: {
+                "open": site in blocked_sites_for_run,
+                "reason": blocked_status_by_site.get(site, ""),
+                "retry_in_current_run": False if site in blocked_sites_for_run else None,
+            }
+            for site in requested_sites
+        }
+        location_fallback_sites = unique_preserving_order([
+            *blocked_sites_for_run,
+            *(
+                site
+                for run in family_runs.values()
+                for site in run.get("fallback_sites", [])
+            ),
+        ])
+        location_diagnostics["fallback_sites"] = location_fallback_sites
+        location_diagnostics["sites_with_results"] = [
+            site for site, count in location_diagnostics["result_counts_by_site"].items()
+            if count > 0
+        ]
+        location_diagnostics["sites_without_results"] = [
+            site for site, count in location_diagnostics["result_counts_by_site"].items()
+            if count == 0
+        ]
         location_fallback: dict[str, Any] = {
             "requested_boards": [],
             "status": "not_needed",
@@ -910,6 +1148,10 @@ def command_agent_a_find(args: argparse.Namespace, root: Path) -> int:
         "status": "disabled_by_flag",
         "resolved_active_jobs": 0,
     }
+    search_config = read_json(root / "config" / "searches.json")
+    configured_greenhouse_boards = search_config.get("greenhouse_live_boards", [])
+    if not isinstance(configured_greenhouse_boards, list):
+        configured_greenhouse_boards = []
     if not args.no_webclaw_fallback:
         direct_jobs, direct_ats_diagnostics = direct_ats_discovery(
             client,
@@ -917,6 +1159,7 @@ def command_agent_a_find(args: argparse.Namespace, root: Path) -> int:
             locations=locations,
             hours_old=args.hours_old,
             results_wanted=args.results_wanted,
+            greenhouse_boards=configured_greenhouse_boards,
         )
         fallback_jobs.extend(direct_jobs)
 
@@ -1002,6 +1245,13 @@ def command_agent_a_find(args: argparse.Namespace, root: Path) -> int:
     }
     diagnostics: dict[str, Any] = {
         "provider": "jobspy",
+        "discovery_checkpoint": {
+            "path": str(checkpoint_path),
+            "run_key": checkpoint_key,
+            "resumed_batches": resumed_batches,
+            "completed_batches": len(completed_batches),
+            "board_timeout_seconds": args.board_timeout_seconds,
+        },
         "locations": locations,
         "location_runs": location_runs,
         "requested_sites": requested_sites,
@@ -1193,12 +1443,13 @@ def command_agent_a_find(args: argparse.Namespace, root: Path) -> int:
             continue
         job = job_from_resolution_error(
             record,
-            default_location=str(record.get("location") or locations[0]),
+            default_location="Unspecified",
         )
         unresolved_jobs.append(job)
         unresolved_by_url.setdefault(canonical_url(job.url), record)
     unresolved_jobs, unresolved_duplicates = deduplicate_candidates(unresolved_jobs)
     unresolved_duplicate_source_records = len(unresolved_duplicates)
+    recovery_queue: list[dict[str, Any]] = []
     for job in unresolved_jobs:
         record = unresolved_by_url.get(canonical_url(job.url), {})
         role = evaluate_role_scope(job, args.query)
@@ -1239,14 +1490,178 @@ def command_agent_a_find(args: argparse.Namespace, root: Path) -> int:
             ))
             continue
         employer_url = job.url if record.get("employer_url_found") else ""
-        manual_records.append(manual_disposition(
+        recovery_category = str(record.get("failure_category") or category)
+        recovery_score = preliminary_score(job)
+        manual_record = manual_disposition(
             job,
             str(record.get("error") or "Employer application page could not be confirmed."),
-            failure_category=str(record.get("failure_category") or category),
-            preliminary_score=preliminary_score(job),
+            failure_category=recovery_category,
+            preliminary_score=recovery_score,
             employer_url=employer_url,
             source_urls=record.get("source_urls", []),
-        ))
+        )
+        manual_records.append(manual_record)
+        if recovery_category in RECOVERY_FAILURE_CATEGORIES:
+            freshness = recruiter.inspect(
+                job,
+                fresh_days=effective_fresh_days,
+                fresh_hours=args.fresh_hours,
+            )
+            known_company = normalize_term(job.company) not in {
+                "", "unknown", "unknown company",
+            }
+            exact_target_role = role.eligible and not is_manual_review_role(job)
+            high_priority = exact_target_role and recovery_score >= 72 and known_company
+            recovery_queue.append({
+                "job": job,
+                "record": record,
+                "score": recovery_score,
+                "category": recovery_category,
+                "known_company": known_company,
+                "exact_target_role": exact_target_role,
+                "fresh": freshness.fresh is True,
+                "high_priority": high_priority,
+            })
+    initially_verified_count = len(verified_jobs)
+    recovery_attempts: list[dict[str, Any]] = []
+    recovery_promotions: list[dict[str, Any]] = []
+    recovery_triggered = initially_verified_count < 5
+    high_priority_recovery = sorted(
+        (item for item in recovery_queue if item["high_priority"]),
+        key=lambda item: (
+            not bool(item["fresh"]),
+            -float(item["score"]),
+            normalize_term(item["job"].company),
+            normalize_term(item["job"].title),
+        ),
+    )
+    if recovery_triggered:
+        for item in high_priority_recovery:
+            source_job = item["job"]
+            attempt: dict[str, Any] = {
+                "candidate_id": source_job.id,
+                "title": source_job.title,
+                "company": source_job.company,
+                "location": source_job.location,
+                "preliminary_resume_fit_score": item["score"],
+                "failure_category": item["category"],
+                "status": "manual_verification_required",
+            }
+            try:
+                recovered, recovery_evidence = recover_employer_application(
+                    client,
+                    source_job,
+                    browser_client=browser_client,
+                )
+                raw = dict(recovered.raw)
+                raw["discovery"] = source_job.to_dict()
+                recovered_location = recovered.location
+                if normalize_term(recovered_location) in {
+                    "", "unknown", "unspecified", "not specified", "n a",
+                }:
+                    recovered_location = source_job.location
+                recovered_posted_date = recovered.posted_date or source_job.posted_date
+                recovered = replace(
+                    recovered,
+                    location=recovered_location,
+                    posted_date=recovered_posted_date,
+                    raw=raw,
+                )
+                role_decision = evaluate_role_scope(recovered, args.query)
+                geography_decision = evaluate_geography(recovered, locations)
+                fresh_finding = recruiter.inspect(
+                    recovered,
+                    fresh_days=effective_fresh_days,
+                    fresh_hours=args.fresh_hours,
+                )
+                if not role_decision.eligible:
+                    raise ValueError(
+                        f"recovered role failed role gate: {role_decision.reason}"
+                    )
+                if not geography_decision.eligible:
+                    raise ValueError(
+                        f"recovered role failed geography gate: {geography_decision.reason}"
+                    )
+                if fresh_finding.fresh is not True:
+                    raise ValueError(
+                        "recovered role failed freshness gate: "
+                        + "; ".join(fresh_finding.reasons)
+                    )
+                deduped, _ = deduplicate_candidates([*verified_jobs, recovered])
+                manual_records = [
+                    record for record in manual_records
+                    if record.get("candidate_id") != source_job.id
+                ]
+                if len(deduped) == len(verified_jobs):
+                    attempt.update(
+                        status="deduplicated_to_existing_verified_job",
+                        recovered_url=recovered.url,
+                        recovery_evidence=recovery_evidence,
+                    )
+                else:
+                    verified_jobs.append(recovered)
+                    attempt.update(
+                        status="promoted",
+                        recovered_url=recovered.url,
+                        recovery_evidence=recovery_evidence,
+                    )
+                    recovery_promotions.append({
+                        "source_candidate_id": source_job.id,
+                        "job_id": recovered.id,
+                        "title": recovered.title,
+                        "company": recovered.company,
+                        "location": recovered.location,
+                        "direct_employer_application_url": recovered.url,
+                        "preliminary_resume_fit_score": item["score"],
+                    })
+            except ValueError as exc:
+                manual_records = [
+                    record for record in manual_records
+                    if record.get("candidate_id") != source_job.id
+                ]
+                rejected_records.append(rejected_disposition(
+                    source_job,
+                    "recovery_hard_gate_failed",
+                    str(exc),
+                ))
+                attempt.update(status="excluded", error=str(exc))
+            except WebClawError as exc:
+                disposition, category = classify_resolution_failure(str(exc))
+                attempt.update(error=str(exc), failure_category=category)
+                if disposition == "rejected":
+                    manual_records = [
+                        record for record in manual_records
+                        if record.get("candidate_id") != source_job.id
+                    ]
+                    rejected_records.append(rejected_disposition(
+                        source_job,
+                        category,
+                        str(exc),
+                    ))
+                    attempt["status"] = "excluded"
+                else:
+                    attempt["status"] = "manual_verification_required"
+            recovery_attempts.append(attempt)
+
+    diagnostics["verification_recovery"] = {
+        "trigger_verified_count": 5,
+        "triggered": recovery_triggered,
+        "initially_verified": initially_verified_count,
+        "queued": len(recovery_queue),
+        "high_priority_candidates": len(high_priority_recovery),
+        "attempted": len(recovery_attempts),
+        "promoted": len(recovery_promotions),
+        "remaining_manual": len(manual_records),
+        "attempts": recovery_attempts,
+        "promotions": recovery_promotions,
+        "scoring_algorithm_changed": False,
+        "agent_b_bypassed": False,
+        "agent_c_bypassed": False,
+        "application_approval_bypassed": False,
+    }
+    if browser_client is not None:
+        usage = getattr(browser_client, "run_diagnostics", None)
+        browser_diagnostics["usage"] = usage() if callable(usage) else {}
     diagnostics["previously_applied_count"] = len(previously_applied)
     diagnostics["role_scope_gate"] = {
         "query": args.query,
@@ -1354,6 +1769,15 @@ def command_agent_a_find(args: argparse.Namespace, root: Path) -> int:
         "active_direct_postings_before_scoring": len(verified_jobs),
     }
     discovery_output = root / "data" / "agent_a_discovery.json"
+    checkpoint.update({
+        "status": "complete",
+        "updated_at": utc_now(),
+        "completed_batches": sorted(completed_batches),
+        "jobs": [job.to_dict() for job in jobspy_jobs],
+        "blocked_sites": sorted(blocked_sites_for_run),
+        "blocked_status_by_site": blocked_status_by_site,
+    })
+    write_json_atomic(checkpoint_path, checkpoint)
     write_json(discovery_output, {
         "schema_version": 3,
         "created_at": utc_now(),
@@ -1380,13 +1804,13 @@ def command_agent_a_find(args: argparse.Namespace, root: Path) -> int:
             f"No usable discovery candidates were returned ({detail}). Review {discovery_output}."
         )
     if not candidate_jobs:
-        report_paths = export_reports(
-            [],
-            root / "reports",
-            float(profile["scoring"].get("strong_fit_threshold", 72)),
-            prefix="job_matches",
-            manual_records=manual_records,
+        report_paths, audit_records, audit_summary = _write_current_run_candidate_audit(
+            root,
+            diagnostics,
+            [*manual_records, *rejected_records],
+            duplicate_source_records=len(duplicate_rejections) + unresolved_duplicate_source_records,
         )
+        write_json(discovery_output, {**read_json(discovery_output), "diagnostics": diagnostics})
         output = args.output or (root / "data" / "agent_a_findings.json")
         write_json(output, {
             "schema_version": 1,
@@ -1400,17 +1824,17 @@ def command_agent_a_find(args: argparse.Namespace, root: Path) -> int:
             f"Agent A discovered {len(combined)} normalized jobs; "
             f"{len(previously_applied)} were already applied and "
             f"{len(explicitly_excluded)} were explicitly excluded; "
-            f"{len(manual_records)} require manual verification. Report: {report_paths[0]}. Findings: {output}"
+            f"{len(manual_records)} require manual verification. Report: {report_paths['html']}. Findings: {output}"
         )
         return 0
     if not verified_jobs:
-        report_paths = export_reports(
-            [],
-            root / "reports",
-            float(profile["scoring"].get("strong_fit_threshold", 72)),
-            prefix="job_matches",
-            manual_records=manual_records,
+        report_paths, audit_records, audit_summary = _write_current_run_candidate_audit(
+            root,
+            diagnostics,
+            [*manual_records, *rejected_records],
+            duplicate_source_records=len(duplicate_rejections) + unresolved_duplicate_source_records,
         )
+        write_json(discovery_output, {**read_json(discovery_output), "diagnostics": diagnostics})
         output = args.output or (root / "data" / "agent_a_findings.json")
         write_json(output, {
             "schema_version": 1,
@@ -1424,7 +1848,7 @@ def command_agent_a_find(args: argparse.Namespace, root: Path) -> int:
         })
         print(
             "No candidate passed employer-page verification, exact role, geography, "
-            f"and known-date freshness gates. Empty current-run report: {report_paths[0]}"
+            f"and known-date freshness gates. Current-run audit: {report_paths['html']}"
         )
         return 0
     profile = load_profile(root)
@@ -1458,14 +1882,15 @@ def command_agent_a_find(args: argparse.Namespace, root: Path) -> int:
             if float(record["final_score"]) >= report_score_floor
         ]
         shortlist_ids = [record["id"] for record in ranked_current[:max_results]]
-        report_paths = _export(
+        shortlist_paths = _export(
             store,
             profile,
             root,
             report_score_floor,
             job_ids=shortlist_ids,
             limit=max_results,
-            manual_records=manual_records,
+            prefix="job_matches_verified",
+            manual_records=[],
         )
     job_by_id = {job.id: job for job in verified_jobs}
     score_by_id = {
@@ -1497,9 +1922,12 @@ def command_agent_a_find(args: argparse.Namespace, root: Path) -> int:
             employer_url_found=True,
             canonical_employer_url=job.url,
         ))
-    diagnostics["candidate_dispositions"] = [
-        *verified_records, *manual_records, *rejected_records
-    ]
+    report_paths, audit_records, audit_summary = _write_current_run_candidate_audit(
+        root,
+        diagnostics,
+        [*verified_records, *manual_records, *rejected_records],
+        duplicate_source_records=len(duplicate_rejections) + unresolved_duplicate_source_records,
+    )
     diagnostics["manual_verification_queue"] = {
         "count": len(manual_records),
         "eligible_for_agent_b": False,
@@ -1507,10 +1935,6 @@ def command_agent_a_find(args: argparse.Namespace, root: Path) -> int:
         "records": manual_records,
     }
     diagnostics["current_run_counts"].update({
-        "unique_candidates": len(verified_records) + len(manual_records) + len(rejected_records),
-        "verified": len(verified_records),
-        "manual_verification_required": len(manual_records),
-        "rejected": len(rejected_records),
         "hard_gate_passed_pending_scoring": 0,
         "active_direct_postings_before_scoring": len(verified_jobs),
     })
@@ -1555,7 +1979,7 @@ def command_agent_a_find(args: argparse.Namespace, root: Path) -> int:
         f"WebClaw verified {len(live_verified_jobs)} active employer postings; "
         f"{stored} matched the requested geography, Agent B scored {scored}, and "
         f"the report contains {len(shortlist_ids)} current-run role(s) (maximum 10). "
-        f"Report: {report_paths[0]}"
+        f"All-candidates report: {report_paths['html']}. Verified shortlist: {shortlist_paths[0]}"
     )
     if previously_applied:
         print(f"Agent A omitted {len(previously_applied)} previously applied role(s).")
@@ -1594,6 +2018,29 @@ def command_agent_a_find(args: argparse.Namespace, root: Path) -> int:
 
 def command_agent_b(args: argparse.Namespace, root: Path) -> int:
     """Agent B: independently verify fit and issue apply, review, or skip decisions."""
+    records: list[dict[str, Any]] = []
+    discovery_path = root / "data" / "agent_a_discovery.json"
+    discovery_payload = read_json(discovery_path) if discovery_path.exists() else {}
+    disposition_by_id = {
+        str(record.get("candidate_id")): record
+        for record in discovery_payload.get("diagnostics", {}).get("candidate_dispositions", [])
+    }
+    requested_ids = list(args.job_id or [])
+    ineligible = [
+        job_id for job_id in requested_ids
+        if disposition_by_id.get(job_id, {}).get("disposition") != "verified"
+        or disposition_by_id.get(job_id, {}).get("eligible_for_agent_b") is not True
+    ]
+    if not requested_ids:
+        raise ValueError(
+            "Agent B requires at least one explicit current-run verified job ID; "
+            "an empty selection must not fall back to historical database jobs."
+        )
+    if ineligible:
+        raise ValueError(
+            "Agent B accepts only current-run candidates categorized as verified. "
+            "Rejected job ID(s): " + ", ".join(ineligible)
+        )
     profile = load_profile(root)
     threshold = (
         args.min_score
@@ -1601,9 +2048,6 @@ def command_agent_b(args: argparse.Namespace, root: Path) -> int:
         else float(profile["scoring"].get("strong_fit_threshold", 72))
     )
     client = _client(root, args) if args.live else None
-    records: list[dict[str, Any]] = []
-    discovery_path = root / "data" / "agent_a_discovery.json"
-    discovery_payload = read_json(discovery_path) if discovery_path.exists() else {}
     requested_locations = list(getattr(args, "location", None) or [])
     if not requested_locations:
         requested_locations = list(discovery_payload.get("locations", []))
@@ -2088,6 +2532,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     agent_a_find.add_argument("--hours-old", type=int, default=168)
     agent_a_find.add_argument("--results-wanted", type=int, default=10)
+    agent_a_find.add_argument(
+        "--board-timeout-seconds",
+        type=float,
+        default=45,
+        help="hard timeout for each individual JobSpy board request",
+    )
     agent_a_find.add_argument(
         "--max-results",
         type=int,

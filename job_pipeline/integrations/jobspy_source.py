@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import math
 import logging
+import queue
 import re
+import threading
 from datetime import date, datetime
 from typing import Any, Callable, Protocol
 
@@ -194,9 +196,44 @@ class JobSpySource:
     name = "jobspy"
     supported_sites = ("linkedin", "indeed", "glassdoor", "zip_recruiter", "google")
 
-    def __init__(self, scraper: Callable[..., Any] | None = None):
+    def __init__(
+        self,
+        scraper: Callable[..., Any] | None = None,
+        *,
+        board_timeout_seconds: float = 45,
+    ):
         self._scraper = scraper
+        self.board_timeout_seconds = max(0.1, float(board_timeout_seconds))
         self.last_diagnostics: dict[str, Any] = {}
+
+    def _scrape_with_timeout(
+        self, scraper: Callable[..., Any], options: dict[str, Any]
+    ) -> Any:
+        """Run one provider call in a daemon thread with a hard wall-clock limit."""
+        outcome: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=1)
+
+        def invoke() -> None:
+            try:
+                outcome.put(("result", scraper(**options)))
+            except BaseException as exc:
+                outcome.put(("error", exc))
+
+        worker = threading.Thread(
+            target=invoke,
+            name=f"jobspy-{options['site_name'][0]}",
+            daemon=True,
+        )
+        worker.start()
+        try:
+            kind, value = outcome.get(timeout=self.board_timeout_seconds)
+        except queue.Empty as exc:
+            site = options["site_name"][0]
+            raise TimeoutError(
+                f"{site} exceeded the {self.board_timeout_seconds:g}s board timeout"
+            ) from exc
+        if kind == "error":
+            raise value
+        return value
 
     def _load_scraper(self) -> Callable[..., Any]:
         """Import JobSpy lazily so the base CLI remains dependency-free."""
@@ -261,7 +298,11 @@ class JobSpySource:
             board_logger = logging.getLogger(_board_logger_name(call_site))
             board_logger.addHandler(capture)
             try:
-                result = scraper(**scraper_options)
+                result = self._scrape_with_timeout(scraper, scraper_options)
+            except TimeoutError as exc:
+                provider_errors.append(f"{call_site}: {exc}")
+                board_status[call_site] = "timed_out"
+                continue
             except Exception as exc:  # third-party providers expose heterogeneous errors
                 provider_errors.append(f"{call_site}: {exc}")
                 board_status[call_site] = "error"
@@ -309,7 +350,9 @@ class JobSpySource:
             elif site not in board_status:
                 board_status[site] = "error"
         blocked_sites = [
-            site for site, status in board_status.items() if status in {"blocked_400", "blocked_403"}
+            site
+            for site, status in board_status.items()
+            if status in {"blocked_400", "blocked_403", "timed_out"}
         ]
         self.last_diagnostics = {
             "provider": self.name,
@@ -347,8 +390,9 @@ class JobSpySource:
             "fallback_sites": sites_without_results,
             "fallback_recommended": bool(sites_without_results),
             "note": (
-                "Every board is called once. HTTP 400/403 opens that board's circuit breaker for "
-                "the current run. Empty, blocked, and errored boards are eligible for WebClaw fallback."
+                "Every board call has a hard wall-clock timeout. HTTP 400/403 and timeouts open "
+                "that board's circuit breaker for the current run. Empty, blocked, timed-out, "
+                "and errored boards are eligible for WebClaw fallback."
             ),
         }
         return jobs

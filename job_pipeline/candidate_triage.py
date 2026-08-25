@@ -143,19 +143,28 @@ def _merge_evidence(preferred: Job, other: Job) -> Job:
 
 
 def rejected_disposition(job: Job, category: str, reason: str, **extra: Any) -> dict[str, Any]:
-    """Create the stable rejected-candidate contract used in Agent A diagnostics."""
+    """Create the stable excluded-candidate contract used in Agent A diagnostics."""
+    source_urls = _job_source_urls(job, extra.pop("source_urls", ()))
+    verified_url = str(
+        extra.get("canonical_employer_url")
+        or extra.get("employer_url")
+        or ""
+    ) if extra.get("employer_url_found") else ""
     value: dict[str, Any] = {
         "candidate_id": job.id,
-        "disposition": "rejected",
+        "disposition": "excluded",
         "failure_category": category,
         "reason": normalize_space(reason),
         "title": job.title,
         "company": job.company,
         "source_url": job.url,
+        "source_urls": source_urls,
+        "url_evidence": url_evidence(source_urls, verified_url=verified_url),
         "location": job.location,
         "posting_date_evidence": job.posted_date,
         "employer_url_found": False,
         "eligible_for_agent_b": False,
+        "eligible_for_agent_c": False,
     }
     value.update(extra)
     return value
@@ -210,6 +219,7 @@ def classify_resolution_failure(message: str) -> tuple[str, str]:
         "access_blocked": ("access challenge", "captcha", "security verification", "verify you are human", "http 403"),
         "login_required": ("sign in", "login required", "authentication"),
         "javascript_only": ("javascript", "document body is loading", "visible text"),
+        "browser_budget_exhausted": ("hourly", "allowance", "read limit", "budget exhausted", "too many requests"),
         "temporary_access_failure": ("timeout", "not reachable", "http 429", "http 500", "http 502", "http 503"),
         "insufficient_page_evidence": ("too short", "could not read", "unavailable", "uncertain"),
     }
@@ -230,7 +240,7 @@ def manual_disposition(
 ) -> dict[str, Any]:
     """Create a visible manual-review record that can never enter Agent B or C."""
     _, inferred = classify_resolution_failure(reason)
-    urls = unique_preserving_order([job.url, *source_urls])
+    urls = unique_preserving_order([job.url, employer_url, *source_urls])
     return {
         "candidate_id": job.id or stable_id(job.url, job.title, job.company),
         "disposition": "manual_verification_required",
@@ -238,6 +248,7 @@ def manual_disposition(
         "company": job.company,
         "source_url": job.url,
         "source_urls": urls,
+        "url_evidence": url_evidence(urls),
         "location": job.location,
         "posting_date_evidence": job.posted_date,
         "preliminary_resume_fit_score": preliminary_score,
@@ -247,6 +258,7 @@ def manual_disposition(
             "Open the source read-only, confirm the exact employer, role, location, "
             "posting date, and active direct application URL."
         ),
+        "warning": MANUAL_REVIEW_WARNING,
         "employer_url_found": bool(employer_url),
         "employer_url": employer_url,
         "eligible_for_agent_b": False,
@@ -302,13 +314,15 @@ def job_from_resolution_error(
 
 def verified_disposition(job: Job, score: float | None = None) -> dict[str, Any]:
     """Create a verified Agent A disposition after every hard gate passes."""
+    source_urls = _job_source_urls(job)
     return {
         "candidate_id": job.id,
         "disposition": "verified",
         "title": job.title,
         "company": job.company,
         "source_url": job.url,
-        "source_urls": list((job.raw or {}).get("discovery_evidence", {}).get("source_urls", [job.url])),
+        "source_urls": source_urls,
+        "url_evidence": url_evidence(source_urls, verified_url=job.url),
         "location": job.location,
         "posting_date_evidence": job.posted_date,
         "preliminary_resume_fit_score": score,
@@ -320,3 +334,119 @@ def verified_disposition(job: Job, score: float | None = None) -> dict[str, Any]
         "eligible_for_agent_b": True,
         "eligible_for_agent_c": False,
     }
+BOARD_DOMAINS = {
+    "linkedin.com", "indeed.com", "glassdoor.com", "ziprecruiter.com",
+}
+
+MANUAL_REVIEW_WARNING = (
+    "This job has not been fully verified. Confirm that it is active and locate "
+    "the employer?s official application page before proceeding."
+)
+
+
+def is_board_url(url: str) -> bool:
+    """Return whether a URL belongs to an exact supported aggregator domain."""
+    host = (urlsplit(url).hostname or "").casefold()
+    return any(_host_matches(host, domain) for domain in BOARD_DOMAINS)
+
+
+def url_evidence(
+    urls: Iterable[str],
+    *,
+    verified_url: str = "",
+) -> list[dict[str, str]]:
+    """Label candidate URLs without mistaking a board for an employer page."""
+    verified = canonical_url(verified_url) if verified_url else ""
+    evidence: list[dict[str, str]] = []
+    for raw_url in unique_preserving_order(urls):
+        url = canonical_url(str(raw_url))
+        if not url:
+            continue
+        if verified and url == verified and not is_board_url(url):
+            label = "verified_direct_application_link"
+        elif is_board_url(url):
+            label = "original_board_link"
+        else:
+            label = "unverified_link_requiring_manual_review"
+        evidence.append({"url": url, "label": label})
+    return evidence
+
+
+def _job_source_urls(job: Job, extra: Iterable[str] = ()) -> list[str]:
+    discovery = (job.raw or {}).get("discovery_evidence", {})
+    return unique_preserving_order([
+        job.url,
+        *list(discovery.get("source_urls", [])),
+        *list(extra),
+    ])
+
+def reconcile_dispositions(
+    records: Iterable[dict[str, Any]],
+    *,
+    duplicate_source_records: int = 0,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Create one current-run record per candidate and reconcile exact totals."""
+    precedence = {"excluded": 0, "manual_verification_required": 1, "verified": 2}
+    grouped: dict[str, dict[str, Any]] = {}
+    for source in records:
+        record = dict(source)
+        key = str(record.get("candidate_id") or stable_id(
+            str(record.get("source_url") or ""),
+            str(record.get("title") or ""),
+            str(record.get("company") or ""),
+        ))
+        urls = unique_preserving_order([
+            str(record.get("source_url") or ""),
+            *list(record.get("source_urls") or []),
+        ])
+        record["source_urls"] = urls
+        verified_url = str(record.get("employer_url") or record.get("canonical_employer_url") or "")
+        record["url_evidence"] = url_evidence(
+            urls,
+            verified_url=verified_url if record.get("employer_url_found") else "",
+        )
+        record["audit_events"] = [{
+            "disposition": record.get("disposition", "excluded"),
+            "failure_category": record.get("failure_category", ""),
+            "reason": record.get("reason", ""),
+        }]
+        if key not in grouped:
+            grouped[key] = record
+            continue
+        current = grouped[key]
+        if precedence.get(str(record.get("disposition")), -1) > precedence.get(
+            str(current.get("disposition")), -1
+        ):
+            preferred, other = record, current
+        else:
+            preferred, other = current, record
+        preferred["source_urls"] = unique_preserving_order([
+            *list(preferred.get("source_urls") or []),
+            *list(other.get("source_urls") or []),
+        ])
+        preferred["audit_events"] = [
+            *list(current.get("audit_events") or []),
+            *list(record.get("audit_events") or []),
+        ]
+        verified_url = str(preferred.get("employer_url") or preferred.get("canonical_employer_url") or "")
+        preferred["url_evidence"] = url_evidence(
+            preferred["source_urls"],
+            verified_url=verified_url if preferred.get("employer_url_found") else "",
+        )
+        grouped[key] = preferred
+
+    reconciled = list(grouped.values())
+    for record in reconciled:
+        record["duplicate_alias_count"] = max(0, len(record.get("source_urls", [])) - 1)
+    summary = {
+        "current_run_candidates_discovered": len(reconciled) + max(0, duplicate_source_records),
+        "unique_current_run_candidates": len(reconciled),
+        "verified": sum(record.get("disposition") == "verified" for record in reconciled),
+        "manual_verification_required": sum(record.get("disposition") == "manual_verification_required" for record in reconciled),
+        "excluded": sum(record.get("disposition") == "excluded" for record in reconciled),
+        "already_applied": sum(record.get("failure_category") == "already_applied" for record in reconciled),
+        "duplicates": max(0, duplicate_source_records),
+    }
+    if summary["unique_current_run_candidates"] != summary["verified"] + summary["manual_verification_required"] + summary["excluded"]:
+        raise ValueError("Current-run candidate totals do not reconcile.")
+    return reconciled, summary

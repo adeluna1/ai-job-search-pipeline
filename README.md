@@ -27,7 +27,7 @@ Job searches often scatter discovery, resume comparison, notes, and application 
 6. Adds a local Career Ops-inspired posting-confidence layer: URL/provenance trust, 90-day repost detection, and near-duplicate description fingerprints. These advisory signals never change resume-fit scores.
 7. Scores title alignment, demonstrated skills, experience, location, and responsibility overlap only after the active-page verification gate passes.
 8. Optionally adds a Resume-Matcher tailoring-preview ATS score, keyword gaps, and recommendations without replacing the original explainable score.
-9. Produces an interactive HTML report and CSV shortlist. The HTML clearly separates verified ranked jobs from manual-verification leads and reports only current-run totals.
+9. Produces a complete current-run HTML/CSV/JSON audit plus a separate verified-only shortlist. Every unique candidate is categorized as `verified`, `manual_verification_required`, or `excluded`; historical benchmarks never count toward current-run totals.
 10. Coordinates a recruiter agent, an independent verifier, and a browser-use application assistant in Paperclip; every browser action is bound to the exact packet hash, job URL, and approved action.
 
 ## Quick start on Windows
@@ -41,7 +41,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 Copy-Item .env.example .env
 ```
 
-Edit `.env` and set `SERPER_API_KEY` for automated search. A Serper key is only needed for discovery; you can always ingest job URLs directly without it.
+Edit `.env` and set `TAVILY_API_KEY` for automated search. A Tavily free key is used for discovery and page extraction; you can always ingest job URLs directly without it.
 
 Run a no-key demonstration first:
 
@@ -88,7 +88,7 @@ Run the real pipeline with your resume:
 .\run.ps1 run --resume "C:\path\to\Albert Deluna ResumeV1.docx" --max-jobs 30
 ```
 
-Open `reports\job_matches.html` after the run. The pipeline never copies the resume; it extracts and redacts contact details in memory.
+Open `reports\job_matches.html` for every current-run candidate or `reports\job_matches_verified.html` for the Agent B-eligible shortlist. The pipeline never copies the resume; it extracts and redacts contact details in memory.
 
 ## Paperclip agent team
 
@@ -177,14 +177,14 @@ The desktop app defaults to a seven-day daily search. Its optional 14-day window
 
 Set values in `.env`; never commit the real file.
 
-- `SERPER_API_KEY`: enables WebClaw search.
-- `WEBCLAW_API_KEY`: optional fallback for protected or JavaScript-rendered pages.
+- `TAVILY_API_KEY`: enables Tavily discovery and employer-page extraction.
+- `TAVILY_API_KEY`: enables employer-page extraction and summarization.
 - `AGENT_WEB_BROWSER_URL`: optional read-only local bridge; fixed to `http://127.0.0.1:7896`.
-- `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`: optional AI scoring through WebClaw.
+- `WEBCLAW_API_KEY`: optional fallback for protected or JavaScript-rendered pages.`r`n- `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`: optional AI scoring through WebClaw.
 - Ollama requires no API key; start it locally and pass `--ai --llm-provider ollama`.
 - `WEBCLAW_BIN`: optional explicit path to the `webclaw` executable.
 - `RESUME_MATCHER_URL`: optional user-controlled Resume-Matcher API; default is `http://127.0.0.1:3000/api/v1`.
-- `OPENAI_API_KEY`: also used by the browser-use runner when an approved browser session is executed.
+- `WEBCLAW_API_KEY`: optional fallback for protected or JavaScript-rendered pages.`r`n- `OPENAI_API_KEY`: also used by the browser-use runner when an approved browser session is executed.
 
 Posting intelligence is local and deterministic. Configure it in `config/profile.json` under `posting_intelligence`; profiles that omit the block or set `enabled` to `false` retain the prior verified-page and resume-ranking behavior without changing search configuration.
 
@@ -218,8 +218,11 @@ The included profile emphasizes:
 - `data/application_approvals/`: ignored, per-packet approval receipts.
 - `data/browser_plans/`: ignored browser-use dry-run plans without candidate field values.
 - `data/application_results/`: ignored browser outcomes requiring employer-receipt verification.
-- `reports/job_matches.html`: interactive shortlist.
-- `reports/job_matches.csv`: sortable export.
+- `reports/job_matches.html`, `.csv`, `.json`: complete current-run candidate audit with category, lifecycle, duplicate, and URL-evidence labels.
+- `reports/job_matches_verified.html`, `.csv`: verified-only shortlist eligible for Agent B.
+- `reports/job_matches_manual_verification.html`, `.csv`, `.json`: visible leads that require a human check and cannot reach Agent B or C.
+- `reports/job_matches_excluded.html`, `.csv`, `.json`: every rejected current-run candidate with its exact reason, including already-applied roles.
+- Historical comparison data is separately labeled and is never included in current-run counts.
 - `reports/agent_demo.json`: offline three-agent contract test.
 - `reports/paperclip_setup.json`: non-sensitive Paperclip entity IDs and safety state.
 - `reports/paperclip_validation.json`: reproducible paused/sandboxed control-plane check.

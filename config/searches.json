@@ -1,6 +1,9 @@
 {
   "country": "us",
   "language": "en",
+  "greenhouse_live_boards": [
+    "densityai"
+  ],
   "results_per_query": 8,
   "queries": [
     "\"recruiting coordinator\" (\"San Jose\" OR \"Bay Area\" OR remote) job",

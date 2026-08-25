@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 import html
+import json
 import re
 from typing import Any, Iterable
 from urllib.parse import urlsplit
@@ -81,19 +83,25 @@ DIRECT_ATS_SEARCH_GROUPS = {
     "workwolf": ("workwolf.com",),
 }
 TITLE_SEARCH_FAMILIES = {
-    "coordination": (
+    "recruiting_coordination": (
         "recruiting coordinator", "recruitment coordinator",
-        "talent acquisition coordinator", "recruiting assistant",
-        "recruiting scheduler", "candidate experience coordinator",
-        "sourcing coordinator", "university recruiting coordinator",
+        "recruiting assistant", "recruiting scheduler",
     ),
-    "operations": (
+    "talent_acquisition_coordination": (
+        "talent acquisition coordinator", "sourcing coordinator",
+    ),
+    "recruiting_operations": (
         "recruiting operations coordinator", "talent operations coordinator",
+        "candidate experience coordinator",
     ),
     "junior_recruiter": (
-        "recruiting associate", "associate recruiter", "junior recruiter",
+        "recruiting associate", "associate recruiter",
+        "talent acquisition associate", "junior recruiter",
         "recruiter i", "recruiter 1", "talent acquisition specialist",
-        "university recruiter",
+    ),
+    "university_recruiting": (
+        "university recruiting coordinator", "university recruiter",
+        "campus recruiter", "campus recruiting coordinator",
     ),
     "adjacent_review": (
         "recruitment and hr coordinator", "talent strategy and operations associate",
@@ -110,6 +118,19 @@ NON_APPLICATION_DOMAINS = (
     "google.com",
 )
 
+
+BAY_AREA_DIRECT_SEARCH_LOCATIONS = (
+    "Mountain View, California",
+    "Palo Alto, California",
+    "Santa Clara, California",
+    "Sunnyvale, California",
+    "Fremont, California",
+    "San Mateo, California",
+    "Redwood City, California",
+    "Walnut Creek, California",
+    "Pleasanton, California",
+)
+GREENHOUSE_BOARD_TOKEN = re.compile(r"^[a-z0-9][a-z0-9-]{0,79}$")
 
 def _host(url: str) -> str:
     return urlsplit(url).netloc.casefold()
@@ -155,6 +176,95 @@ def _is_application_candidate(url: str) -> bool:
         or any(token in path for token in ("/job", "/jobs", "/career", "/apply", "/position"))
     )
 
+def _expanded_direct_search_locations(locations: Iterable[str]) -> list[str]:
+    """Expand a Bay Area alias for discovery while preserving exact downstream gates."""
+    requested = unique_preserving_order(
+        normalize_space(location) for location in locations if normalize_space(location)
+    )
+    if any("bay area" in normalize_term(location) for location in requested):
+        requested.extend(
+            location
+            for location in BAY_AREA_DIRECT_SEARCH_LOCATIONS
+            if location not in requested
+        )
+    return requested
+
+
+def _parse_greenhouse_updated_at(value: str) -> datetime | None:
+    """Parse the official Greenhouse feed timestamp without guessing."""
+    try:
+        parsed = datetime.fromisoformat(normalize_space(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _live_greenhouse_candidates(
+    client: WebClawClient,
+    boards: Iterable[str],
+    title_groups: dict[str, list[str]],
+    hours_old: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Read configured public Greenhouse feeds so new jobs need not be search-indexed."""
+    diagnostics: dict[str, Any] = {
+        "requested_boards": [], "endpoints": {}, "errors": {},
+        "jobs_seen": 0, "matching_recent_jobs": 0,
+    }
+    matches: list[dict[str, Any]] = []
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=max(1, int(hours_old)))
+    requested_titles = [
+        (family, normalize_term(title), title)
+        for family, titles in title_groups.items()
+        for title in titles
+    ]
+    for raw_board in unique_preserving_order(boards):
+        board = normalize_space(raw_board).casefold()
+        if not GREENHOUSE_BOARD_TOKEN.fullmatch(board):
+            diagnostics["errors"][board or str(raw_board)] = "invalid Greenhouse board token"
+            continue
+        diagnostics["requested_boards"].append(board)
+        endpoint = f"https://boards-api.greenhouse.io/v1/boards/{board}/jobs?content=true"
+        diagnostics["endpoints"][board] = endpoint
+        try:
+            probe = client.probe(endpoint)
+            status = int(probe.get("status") or 0)
+            if status < 200 or status >= 300:
+                raise WebClawError(f"official Greenhouse feed returned HTTP {status}")
+            payload = json.loads(str(probe.get("body") or ""))
+            records = payload.get("jobs", []) if isinstance(payload, dict) else []
+            if not isinstance(records, list):
+                raise WebClawError("official Greenhouse feed returned an unexpected shape")
+        except (WebClawError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            diagnostics["errors"][board] = str(exc)
+            continue
+        diagnostics["jobs_seen"] += len(records)
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            normalized_title = normalize_term(str(record.get("title") or ""))
+            title_match = next(((family, title) for family, normalized, title in requested_titles
+                                if normalized and normalized in normalized_title), None)
+            updated_at = _parse_greenhouse_updated_at(str(record.get("updated_at") or ""))
+            url = canonical_url(str(record.get("absolute_url") or ""))
+            if (title_match is None or updated_at is None or updated_at < cutoff
+                    or not _host_matches(_host(url), "greenhouse.io")
+                    or "/jobs/" not in urlsplit(url).path.casefold()):
+                continue
+            location_value = record.get("location", {})
+            location = (normalize_space(str(location_value.get("name") or ""))
+                        if isinstance(location_value, dict) else normalize_space(str(location_value or "")))
+            matches.append({
+                "url": url, "title": normalize_space(str(record.get("title") or "")),
+                "location": location, "updated_at": updated_at.isoformat(),
+                "title_group": title_match[0], "requested_title": title_match[1], "board": board,
+            })
+    diagnostics["matching_recent_jobs"] = len(matches)
+    return matches, diagnostics
+
+
+
 
 def _requested_title_groups(search_term: str) -> dict[str, list[str]]:
     """Keep direct-ATS queries small by grouping only titles present in the request."""
@@ -175,6 +285,14 @@ def _requested_title_groups(search_term: str) -> dict[str, list[str]]:
         output["requested"] = safe_titles[:6] or ["recruiting coordinator"]
     return output
 
+
+def requested_title_family_queries(search_term: str) -> dict[str, str]:
+    """Return bounded OR queries for the maintained entry-level title families."""
+    return {
+        family: " OR ".join(f'"{title}"' for title in titles)
+        for family, titles in _requested_title_groups(search_term).items()
+        if titles
+    }
 
 def _discovery_job_hint(
     source_url: str,
@@ -700,6 +818,136 @@ def resolve_employer_application(
     detail = source_reason if not source_valid else "no validated employer application URL was found"
     raise WebClawError(f"Could not resolve {source_url}: {detail}")
 
+RECOVERY_FAILURE_CATEGORIES = {
+    "missing_employer_link",
+    "insufficient_page_evidence",
+    "manual_verification_required",
+    "access_blocked",
+    "login_required",
+    "javascript_only",
+    "temporary_access_failure",
+    "browser_budget_exhausted",
+}
+
+
+def recover_employer_application(
+    client: WebClawClient,
+    job_hint: Job,
+    *,
+    browser_client: AgentWebBrowserClient | None = None,
+    search_limit: int = 8,
+) -> tuple[Job, dict[str, Any]]:
+    """Recover one manual lead through exact employer/ATS searches.
+
+    Search snippets are discovery evidence only. Promotion still requires the normal
+    active-page, direct-domain, title, and employer-identity verification path.
+    """
+    company = normalize_space(job_hint.company)
+    title = normalize_space(job_hint.title)
+    if normalize_term(company) in {"", "unknown", "unknown company"}:
+        raise WebClawError("verification recovery requires a known company name")
+    if normalize_term(title) in {"", "untitled role", "jobs", "careers"}:
+        raise WebClawError("verification recovery requires an exact job title")
+
+    location = normalize_space(job_hint.location)
+    location_known = normalize_term(location) not in {
+        "", "unknown", "unspecified", "not specified", "n a",
+    }
+    job_identifier = ats_job_id(job_hint.url)
+    exact_terms = [f'"{company}"', f'"{title}"']
+    if location_known:
+        exact_terms.append(f'"{location}"')
+    if job_identifier:
+        exact_terms.append(f'"{job_identifier}"')
+    base = " ".join(exact_terms)
+
+    source_host = _host(job_hint.url)
+    official_domains: tuple[str, ...] = ()
+    if (
+        source_host
+        and not _is_board_url(job_hint.url)
+        and not any(_host_matches(source_host, domain) for domain in OTHER_AGGREGATOR_DOMAINS)
+        and not any(_host_matches(source_host, domain) for domain in DIRECT_ATS_DOMAINS)
+        and _identity_slug(_registrant_label(source_host)) == _identity_slug(company)
+    ):
+        official_domains = (source_host,)
+
+    domain_batches = [
+        official_domains,
+        ("greenhouse.io", "ashbyhq.com", "lever.co", "workable.com"),
+        ("myworkdayjobs.com", "workday.com", "smartrecruiters.com", "icims.com"),
+        ("dayforcehcm.com", "dayforce.com", "paycomonline.net", "hrmdirect.com", "workwolf.com"),
+    ]
+    queries: list[str] = [base + " (careers OR jobs OR apply)"]
+    for domains in domain_batches:
+        if domains:
+            queries.append(
+                base + " (" + " OR ".join(f"site:{domain}" for domain in domains) + ")"
+            )
+
+    result_urls: list[str] = []
+    search_errors: list[str] = []
+    raw_url_count = 0
+    for query in queries:
+        try:
+            results = client.search(
+                query,
+                num=max(1, min(int(search_limit), 10)),
+                country="us",
+                language="en",
+            )
+        except WebClawError as exc:
+            search_errors.append(str(exc))
+            continue
+        for result in results:
+            url = canonical_url(str(result.get("link") or ""))
+            if not url or not _is_application_candidate(url):
+                continue
+            raw_url_count += 1
+            if url != canonical_url(job_hint.url):
+                result_urls.append(url)
+    candidates = unique_preserving_order(result_urls)
+    candidates.sort(key=_candidate_rank)
+    diagnostics: dict[str, Any] = {
+        "candidate_id": job_hint.id,
+        "title": title,
+        "company": company,
+        "location": location if location_known else "Unspecified",
+        "job_id": job_identifier,
+        "queries": queries,
+        "candidate_urls": candidates,
+        "duplicate_candidate_urls_avoided": max(0, raw_url_count - len(candidates)),
+        "search_errors": search_errors,
+        "candidate_errors": [],
+    }
+
+    for candidate_url in candidates:
+        try:
+            recovered, resolution = resolve_employer_application(
+                client,
+                candidate_url,
+                browser_client=browser_client,
+                job_hint=job_hint,
+            )
+            if not _same_role(job_hint, recovered):
+                raise WebClawError("recovered employer page title/company mismatch")
+            diagnostics["resolved_url"] = recovered.url
+            diagnostics["resolution"] = resolution
+            return recovered, diagnostics
+        except WebClawError as exc:
+            diagnostics["candidate_errors"].append({
+                "url": candidate_url,
+                "error": str(exc),
+            })
+
+    detail = (
+        diagnostics["candidate_errors"][-1]["error"]
+        if diagnostics["candidate_errors"]
+        else search_errors[-1]
+        if search_errors
+        else "no employer or trusted ATS job-specific URL was found"
+    )
+    raise WebClawError(f"Verification recovery failed for {title} at {company}: {detail}")
 
 def webclaw_fallback_discovery(
     client: WebClawClient,
@@ -710,76 +958,94 @@ def webclaw_fallback_discovery(
     results_wanted: int,
     browser_client: AgentWebBrowserClient | None = None,
 ) -> tuple[list[Job], dict[str, Any]]:
-    """Fill missing board coverage through WebClaw and retain only resolved active roles."""
+    """Search missing boards by bounded title family and verify only direct pages."""
     jobs: list[Job] = []
+    title_queries = requested_title_family_queries(search_term)
     diagnostics: dict[str, Any] = {
         "requested_boards": list(boards),
+        "title_family_queries": title_queries,
         "queries_by_board": {},
         "search_errors_by_board": {},
         "result_urls_by_board": {},
         "resolution_records": [],
         "resolution_errors": [],
+        "duplicate_source_urls_avoided": 0,
     }
     per_board = max(1, min(int(results_wanted), 10))
     days = max(1, (max(1, int(hours_old)) + 23) // 24)
+    seen_source_urls: set[str] = set()
     for board in diagnostics["requested_boards"]:
         domains = BOARD_DOMAINS.get(board, ())
         site_filter = " OR ".join(f"site:{domain}" for domain in domains)
         board_name = board.replace("_", " ")
-        search_expression = (
-            search_term
-            if " OR " in search_term.upper()
-            else f'"{search_term}"'
-        )
-        query = (
-            f'({search_expression}) "{location}" ({site_filter or board_name}) '
-            f'("posted" OR "days ago") past {days} days'
-        )
-        diagnostics["queries_by_board"][board] = query
-        try:
-            results = client.search(query, num=per_board, country="us", language="en")
-        except WebClawError as exc:
-            diagnostics["search_errors_by_board"][board] = str(exc)
-            continue
-        urls = unique_preserving_order(
-            canonical_url(str(result.get("link", "")))
-            for result in results
-            if result.get("link")
-        )
-        result_by_url = {
-            canonical_url(str(result.get("link", ""))): result
-            for result in results if result.get("link")
-        }
-        diagnostics["result_urls_by_board"][board] = urls
-        for url in urls:
-            result = result_by_url.get(url, {})
-            title_evidence = normalize_space(str(result.get("title") or ""))
-            job_hint = _discovery_job_hint(
-                url, title_evidence, location, f"webclaw_fallback:{board}"
+        diagnostics["queries_by_board"][board] = {}
+        diagnostics["result_urls_by_board"][board] = []
+        for family, search_expression in title_queries.items():
+            query = (
+                f'({search_expression}) "{location}" ({site_filter or board_name}) '
+                f'("posted" OR "days ago") past {days} days'
             )
+            diagnostics["queries_by_board"][board][family] = query
             try:
-                job, resolution = resolve_employer_application(
-                    client,
-                    url,
-                    browser_client=browser_client,
-                    job_hint=job_hint,
-                )
-                jobs.append(job)
-                diagnostics["resolution_records"].append(resolution)
+                results = client.search(query, num=per_board, country="us", language="en")
             except WebClawError as exc:
-                diagnostics["resolution_errors"].append({
-                    "board": board,
-                    "location": location,
-                    "source_url": url,
-                    "title": title_evidence or "Unresolved recruiting lead",
-                    "company": job_hint.company,
-                    "posting_date_evidence": "",
-                    "error": str(exc),
-                })
+                diagnostics["search_errors_by_board"].setdefault(board, {})[family] = str(exc)
+                continue
+            urls = unique_preserving_order(
+                canonical_url(str(result.get("link", "")))
+                for result in results
+                if result.get("link")
+            )
+            diagnostics["result_urls_by_board"][board].extend(urls)
+            result_by_url = {
+                canonical_url(str(result.get("link", ""))): result
+                for result in results if result.get("link")
+            }
+            for url in urls:
+                if url in seen_source_urls:
+                    diagnostics["duplicate_source_urls_avoided"] += 1
+                    continue
+                seen_source_urls.add(url)
+                result = result_by_url.get(url, {})
+                title_evidence = normalize_space(str(result.get("title") or ""))
+                job_hint = _discovery_job_hint(
+                    url,
+                    title_evidence,
+                    "Unspecified",
+                    f"webclaw_fallback:{board}:{family}",
+                )
+                try:
+                    job, resolution = resolve_employer_application(
+                        client,
+                        url,
+                        browser_client=browser_client,
+                        job_hint=job_hint,
+                    )
+                    jobs.append(job)
+                    diagnostics["resolution_records"].append({
+                        **resolution,
+                        "title_family": family,
+                    })
+                except WebClawError as exc:
+                    diagnostics["resolution_errors"].append({
+                        "board": board,
+                        "requested_location": location,
+                        "location": "Unspecified",
+                        "source_url": url,
+                        "title": title_evidence or "Unresolved recruiting lead",
+                        "company": job_hint.company,
+                        "posting_date_evidence": "",
+                        "title_family": family,
+                        "error": str(exc),
+                    })
 
     unique_jobs: dict[str, Job] = {}
     for job in jobs:
-        unique_jobs.setdefault(job.url, job)
+        unique_jobs.setdefault(canonical_url(job.url), job)
+    diagnostics["result_urls_by_board"] = {
+        board: unique_preserving_order(urls)
+        for board, urls in diagnostics["result_urls_by_board"].items()
+    }
     diagnostics["resolved_active_jobs"] = len(unique_jobs)
     diagnostics["status"] = (
         "complete"
@@ -800,11 +1066,10 @@ def agent_web_browser_board_discovery(
     boards: Iterable[str],
     results_wanted: int,
 ) -> tuple[list[Job], dict[str, Any]]:
-    """Search signed-in board pages read-only, then resolve employer applications.
+    """Search signed-in boards read-only using bounded title-family queries.
 
-    Each board has a run-scoped circuit breaker. A browser access challenge stops
-    every remaining location for that board, while an ordinary zero-result page
-    remains a valid search outcome.
+    Search pages and job URLs are deduplicated before detail-page reads. Browser
+    allowance failures preserve unresolved candidates for manual review.
     """
     requested_locations = unique_preserving_order(
         normalize_space(location) for location in locations if normalize_space(location)
@@ -812,98 +1077,132 @@ def agent_web_browser_board_discovery(
     requested_boards = unique_preserving_order(
         board for board in boards if board in {"glassdoor", "zip_recruiter"}
     )
+    title_queries = requested_title_family_queries(search_term)
     diagnostics: dict[str, Any] = {
         "requested_boards": requested_boards,
         "requested_locations": requested_locations,
+        "title_family_queries": title_queries,
         "pages_by_board": {board: [] for board in requested_boards},
         "job_links_by_board": {board: [] for board in requested_boards},
         "job_link_records_by_board": {board: [] for board in requested_boards},
         "resolution_records": [],
         "resolution_errors": [],
+        "duplicate_source_urls_avoided": 0,
         "circuit_breakers": {
             board: {"open": False, "reason": "", "retry_in_current_run": False}
             for board in requested_boards
         },
     }
     jobs: list[Job] = []
-    seen_source_urls: set[str] = set()
+    source_records: dict[str, dict[str, str]] = {}
     per_page = max(1, min(int(results_wanted), 10))
     for board in requested_boards:
-        for location in requested_locations:
-            try:
-                result = browser_client.search_job_links(
-                    board=board,
-                    query=search_term,
-                    location=location,
-                    hours_old=hours_old,
-                    results_wanted=per_page,
-                )
-            except AgentWebBrowserError as exc:
-                diagnostics["circuit_breakers"][board] = {
-                    "open": True,
-                    "reason": str(exc),
-                    "retry_in_current_run": False,
-                }
+        board_open = False
+        for family, family_query in title_queries.items():
+            if board_open:
                 break
-            diagnostics["pages_by_board"][board].append({
-                "location": location,
-                "search_url": result.search_url,
-                "page_url": result.page_url,
-                "title": result.title,
-                "text_length": result.text_length,
-                "job_links_found": len(result.job_links),
-            })
-            diagnostics["job_links_by_board"][board].extend(result.job_links)
-            link_records = list(getattr(result, "job_link_records", []))
-            diagnostics["job_link_records_by_board"][board].extend(
-                {**record, "location": location}
-                for record in link_records
-                if isinstance(record, dict)
-            )
-            link_text_by_url = {
-                canonical_url(str(record.get("url") or "")): normalize_space(str(record.get("text") or ""))
-                for record in link_records
-                if isinstance(record, dict) and record.get("url")
-            }
-            for source_url in result.job_links:
-                canonical_source = canonical_url(source_url)
-                if canonical_source in seen_source_urls:
-                    continue
-                seen_source_urls.add(canonical_source)
+            for location in requested_locations:
                 try:
-                    job_hint = _discovery_job_hint(
-                        source_url,
-                        link_text_by_url.get(canonical_source, ""),
-                        location,
-                        f"agent_web_browser:{board}",
+                    result = browser_client.search_job_links(
+                        board=board,
+                        query=family_query,
+                        location=location,
+                        hours_old=hours_old,
+                        results_wanted=per_page,
                     )
-                    job, resolution = resolve_employer_application(
-                        client,
-                        source_url,
-                        browser_client=browser_client,
-                        job_hint=job_hint,
+                except AgentWebBrowserError as exc:
+                    diagnostics["circuit_breakers"][board] = {
+                        "open": True,
+                        "reason": str(exc),
+                        "retry_in_current_run": False,
+                    }
+                    board_open = True
+                    break
+                diagnostics["pages_by_board"][board].append({
+                    "title_family": family,
+                    "requested_location": location,
+                    "search_url": result.search_url,
+                    "page_url": result.page_url,
+                    "title": result.title,
+                    "text_length": result.text_length,
+                    "job_links_found": len(result.job_links),
+                })
+                diagnostics["job_links_by_board"][board].extend(result.job_links)
+                link_records = list(getattr(result, "job_link_records", []))
+                diagnostics["job_link_records_by_board"][board].extend(
+                    {**record, "requested_location": location, "title_family": family}
+                    for record in link_records
+                    if isinstance(record, dict)
+                )
+                link_text_by_url = {
+                    canonical_url(str(record.get("url") or "")): normalize_space(
+                        str(record.get("text") or "")
                     )
-                    jobs.append(job)
-                    diagnostics["resolution_records"].append(resolution)
-                except WebClawError as exc:
-                    diagnostics["resolution_errors"].append({
+                    for record in link_records
+                    if isinstance(record, dict) and record.get("url")
+                }
+                for source_url in result.job_links:
+                    canonical_source = canonical_url(source_url)
+                    if canonical_source in source_records:
+                        diagnostics["duplicate_source_urls_avoided"] += 1
+                        continue
+                    source_records[canonical_source] = {
+                        "url": source_url,
+                        "title": link_text_by_url.get(canonical_source, ""),
+                        "requested_location": location,
+                        "title_family": family,
                         "board": board,
-                        "location": location,
-                        "source_url": source_url,
-                        "title": link_text_by_url.get(canonical_source, "") or "Unresolved recruiting lead",
-                        "company": "Unknown company",
-                        "posting_date_evidence": "",
-                        "error": str(exc),
-                    })
+                    }
+
+    for record in source_records.values():
+        source_url = record["url"]
+        board = record["board"]
+        title_evidence = record["title"]
+        try:
+            job_hint = _discovery_job_hint(
+                source_url,
+                title_evidence,
+                "Unspecified",
+                f"agent_web_browser:{board}:{record['title_family']}",
+            )
+            job, resolution = resolve_employer_application(
+                client,
+                source_url,
+                browser_client=browser_client,
+                job_hint=job_hint,
+            )
+            jobs.append(job)
+            diagnostics["resolution_records"].append({
+                **resolution,
+                "title_family": record["title_family"],
+            })
+        except WebClawError as exc:
+            diagnostics["resolution_errors"].append({
+                "board": board,
+                "requested_location": record["requested_location"],
+                "location": "Unspecified",
+                "source_url": source_url,
+                "title": title_evidence or "Unresolved recruiting lead",
+                "company": "Unknown company",
+                "posting_date_evidence": "",
+                "title_family": record["title_family"],
+                "error": str(exc),
+            })
 
     unique_jobs: dict[str, Job] = {}
     for job in jobs:
         unique_jobs.setdefault(canonical_url(job.url), job)
+    diagnostics["job_links_by_board"] = {
+        board: unique_preserving_order(urls)
+        for board, urls in diagnostics["job_links_by_board"].items()
+    }
     diagnostics["browser_search_pages"] = sum(
         len(pages) for pages in diagnostics["pages_by_board"].values()
     )
-    diagnostics["job_links_found"] = len(seen_source_urls)
+    diagnostics["job_links_found"] = len(source_records)
     diagnostics["resolved_active_jobs"] = len(unique_jobs)
+    usage = getattr(browser_client, "run_diagnostics", None)
+    diagnostics["browser_usage"] = usage() if callable(usage) else {}
     open_breakers = sum(
         1 for value in diagnostics["circuit_breakers"].values() if value["open"]
     )
@@ -916,24 +1215,29 @@ def agent_web_browser_board_discovery(
     )
     return list(unique_jobs.values()), diagnostics
 
+
 def direct_ats_discovery(
     client: WebClawClient,
     search_term: str,
     locations: Iterable[str],
     hours_old: int,
     results_wanted: int,
+    greenhouse_boards: Iterable[str] = (),
 ) -> tuple[list[Job], dict[str, Any]]:
     """Run bounded parallel searches by requested title family and ATS family."""
     requested_locations = unique_preserving_order(
         normalize_space(location) for location in locations if normalize_space(location)
     )
     title_groups = _requested_title_groups(search_term)
+    search_locations = _expanded_direct_search_locations(requested_locations)
     diagnostics: dict[str, Any] = {
         "requested_locations": requested_locations,
         "title_groups": title_groups,
         "ats_families": list(DIRECT_ATS_SEARCH_GROUPS),
+        "search_locations": search_locations,
         "search_concurrency": 4,
         "resolution_concurrency": 4,
+        "live_greenhouse": {},
         "queries_by_title_group_and_ats": {},
         "search_errors_by_title_group_and_ats": {},
         "result_urls_by_title_group_and_ats": {},
@@ -946,7 +1250,7 @@ def direct_ats_discovery(
         "resolution_records": [],
         "resolution_errors": [],
     }
-    location_expression = " OR ".join(f'"{location}"' for location in requested_locations)
+    location_expression = " OR ".join(f'"{location}"' for location in search_locations)
     days = max(1, (max(1, int(hours_old)) + 23) // 24)
     per_search = max(1, min(int(results_wanted), 10))
     tasks: list[dict[str, Any]] = []
@@ -1016,7 +1320,7 @@ def direct_ats_discovery(
             job_hint = _discovery_job_hint(
                 url,
                 title_evidence or list(task["titles"])[0],
-                " | ".join(requested_locations),
+                "Unspecified",
                 f"direct_ats:{task['ats_family']}",
             )
             if url in resolution_tasks:
@@ -1031,6 +1335,41 @@ def direct_ats_discovery(
                 "title_evidence": title_evidence,
                 "job_hint": job_hint,
             }
+
+    live_candidates, live_diagnostics = _live_greenhouse_candidates(
+        client, greenhouse_boards, title_groups, hours_old
+    )
+    diagnostics["live_greenhouse"] = live_diagnostics
+    for record in live_candidates:
+        key = f"{record['title_group']}:greenhouse"
+        url = str(record["url"])
+        diagnostics["resolution_records_by_title_group_and_ats"].setdefault(key, [])
+        diagnostics["resolution_errors_by_title_group_and_ats"].setdefault(key, [])
+        diagnostics["result_urls_by_title_group_and_ats"].setdefault(key, [])
+        diagnostics["result_urls_by_group"].setdefault(key, [])
+        if url not in diagnostics["result_urls_by_title_group_and_ats"][key]:
+            diagnostics["result_urls_by_title_group_and_ats"][key].append(url)
+        if url not in diagnostics["result_urls_by_group"][key]:
+            diagnostics["result_urls_by_group"][key].append(url)
+        if url in resolution_tasks:
+            diagnostics["resolution_records_by_title_group_and_ats"][key].append({
+                "source_url": url,
+                "resolution": "deduplicated_live_greenhouse_feed",
+            })
+            continue
+        resolution_tasks[url] = {
+            "key": key,
+            "title_group": record["title_group"],
+            "titles": [record["requested_title"]],
+            "ats_family": "greenhouse",
+            "url": url,
+            "title_evidence": record["title"],
+            "greenhouse_updated_at": record["updated_at"],
+            "job_hint": _discovery_job_hint(
+                url, record["title"], record["location"],
+                f"greenhouse_live_feed:{record['board']}",
+            ),
+        }
 
     def resolve_one(task: dict[str, Any]) -> tuple[Job, dict[str, Any]]:
         return resolve_employer_application(
@@ -1052,6 +1391,15 @@ def direct_ats_discovery(
             key = str(task["key"])
             try:
                 job, resolution = future.result()
+                greenhouse_updated_at = normalize_space(
+                    str(task.get("greenhouse_updated_at") or "")
+                )
+                if greenhouse_updated_at and not job.posted_date:
+                    raw = dict(job.raw)
+                    raw["verification_provenance"] = {
+                        "posted_date": "official_greenhouse_updated_at",
+                    }
+                    job = replace(job, posted_date=greenhouse_updated_at, raw=raw)
                 jobs.append(job)
                 record = {
                     **resolution,
@@ -1118,6 +1466,10 @@ def verify_discovered_jobs(
         raw["discovery"] = job.to_dict()
         posted_date = refreshed.posted_date or job.posted_date
         location = refreshed.location
+        discovery_provenance = (
+            job.raw.get("verification_provenance", {})
+            if isinstance(job.raw, dict) else {}
+        )
         if normalize_space(location).casefold() in {
             "", "unknown", "unspecified", "not specified", "n/a",
         }:
@@ -1128,7 +1480,11 @@ def verify_discovered_jobs(
         }:
             work_mode = job.work_mode
         raw["verification_provenance"] = {
-            "posted_date": "employer_page" if refreshed.posted_date else "discovery_board",
+            "posted_date": (
+                "employer_page"
+                if refreshed.posted_date
+                else discovery_provenance.get("posted_date", "discovery_board")
+            ),
             "location": "employer_page" if location == refreshed.location else "discovery_board",
             "work_mode": "employer_page" if work_mode == refreshed.work_mode else "discovery_board",
         }

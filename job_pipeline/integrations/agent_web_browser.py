@@ -95,6 +95,12 @@ class AgentWebBrowserClient:
         self.timeout = max(0.5, min(float(timeout), 30.0))
         self._transport = transport or self._default_transport
         self._session_lock = threading.Lock()
+        self._page_cache: dict[tuple[str, str], AgentWebBrowserPage] = {}
+        self._search_cache: dict[tuple[str, str, int], AgentWebBrowserSearchResult] = {}
+        self._logical_page_reads = 0
+        self._duplicate_reads_avoided = 0
+        self._budget_exhausted = False
+        self._budget_error = ""
         self.assert_safe_mode()
 
     @staticmethod
@@ -351,6 +357,28 @@ class AgentWebBrowserClient:
                 return f"{board}:{values[0]}"
         return url
 
+    def _record_read_error(self, exc: Exception) -> None:
+        """Track bridge allowance failures without changing candidate disposition."""
+        message = str(exc)
+        normalized = message.casefold()
+        if any(marker in normalized for marker in (
+            "hourly", "allowance", "read limit", "budget exhausted", "too many requests",
+        )):
+            self._budget_exhausted = True
+            self._budget_error = message
+
+    def run_diagnostics(self) -> dict[str, Any]:
+        """Return run-scoped logical read/cache usage without exposing credentials."""
+        return {
+            "logical_page_reads": self._logical_page_reads,
+            "unique_page_cache_entries": len(self._page_cache),
+            "unique_search_cache_entries": len(self._search_cache),
+            "duplicate_browser_requests_avoided": self._duplicate_reads_avoided,
+            "budget_exhausted": self._budget_exhausted,
+            "budget_error": self._budget_error,
+            "read_only": True,
+        }
+
     def search_job_links(
         self,
         board: str,
@@ -361,26 +389,38 @@ class AgentWebBrowserClient:
         poll_attempts: int = 24,
         poll_delay: float = 0.75,
     ) -> AgentWebBrowserSearchResult:
-        """Navigate a signed-in search page and read job anchors without clicking."""
+        """Navigate once per unique search URL and cache the read-only result."""
         search_url = self.build_search_url(board, query, location, hours_old)
+        limit = max(1, min(int(results_wanted), 50))
+        cache_key = (board, search_url, limit)
         with self._session_lock:
-            page = self._read_job_page_unlocked(
-                search_url,
-                board,
-                poll_attempts=poll_attempts,
-                poll_delay=poll_delay,
-            )
-            link_payload = self._result(self._request("GET", "/page/job-links"))
+            cached = self._search_cache.get(cache_key)
+            if cached is not None:
+                self._duplicate_reads_avoided += 1
+                return cached
+            try:
+                page = self._read_job_page_unlocked(
+                    search_url,
+                    board,
+                    poll_attempts=poll_attempts,
+                    poll_delay=poll_delay,
+                )
+                link_payload = self._result(self._request("GET", "/page/job-links"))
+            except AgentWebBrowserError as exc:
+                self._record_read_error(exc)
+                raise
+            self._logical_page_reads += 1
         if link_payload.get("blocked") is True:
             reason = str(link_payload.get("reason") or "signed-in page blocked access")
-            raise AgentWebBrowserError(f"{board} browser circuit opened: {reason}")
+            error = AgentWebBrowserError(f"{board} browser circuit opened: {reason}")
+            self._record_read_error(error)
+            raise error
         expected_platform = BOARD_PLATFORMS[board]
         payload_board = str(link_payload.get("board") or "").casefold()
         if payload_board and payload_board != expected_platform:
             raise AgentWebBrowserError(
                 f"{board} browser circuit opened: active page changed platforms"
             )
-        limit = max(1, min(int(results_wanted), 50))
         job_links: list[str] = []
         job_link_records: list[dict[str, str]] = []
         seen_job_keys: set[str] = set()
@@ -405,7 +445,7 @@ class AgentWebBrowserClient:
                 job_link_records.append({"url": href, "text": link_text})
             if len(job_links) >= limit:
                 break
-        return AgentWebBrowserSearchResult(
+        result = AgentWebBrowserSearchResult(
             board=board,
             query=" ".join(str(query).split()),
             location=" ".join(str(location).split()),
@@ -416,6 +456,9 @@ class AgentWebBrowserClient:
             job_links=job_links,
             job_link_records=job_link_records,
         )
+        with self._session_lock:
+            self._search_cache[cache_key] = result
+        return result
 
     def read_job_page(
         self,
@@ -424,14 +467,27 @@ class AgentWebBrowserClient:
         poll_attempts: int = 20,
         poll_delay: float = 0.5,
     ) -> AgentWebBrowserPage:
-        """Serialize managed-tab use and return sanitized visible job-page text."""
+        """Read each unique board URL once per run and reuse sanitized page text."""
+        target_url = self._validate_board_url(url, board)
+        cache_key = (board, target_url)
         with self._session_lock:
-            return self._read_job_page_unlocked(
-                url,
-                board,
-                poll_attempts=poll_attempts,
-                poll_delay=poll_delay,
-            )
+            cached = self._page_cache.get(cache_key)
+            if cached is not None:
+                self._duplicate_reads_avoided += 1
+                return cached
+            try:
+                page = self._read_job_page_unlocked(
+                    target_url,
+                    board,
+                    poll_attempts=poll_attempts,
+                    poll_delay=poll_delay,
+                )
+            except AgentWebBrowserError as exc:
+                self._record_read_error(exc)
+                raise
+            self._page_cache[cache_key] = page
+            self._logical_page_reads += 1
+            return page
 
     def _read_job_page_unlocked(
         self,

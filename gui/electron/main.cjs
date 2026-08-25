@@ -514,7 +514,7 @@ ipcMain.handle('search:spawn', async (event, args) => {
 });
 
 ipcMain.handle('jobs:read', async () => {
-  const p = path.join(PIPELINE_ROOT, 'reports', 'job_matches.csv');
+  const p = path.join(PIPELINE_ROOT, 'reports', 'job_matches_verified.csv');
   try {
     const text = fs.readFileSync(p, 'utf8');
     return { exists: true, rows: parseCsv(text), path: p };

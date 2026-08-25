@@ -84,7 +84,7 @@ SELECTED = [
 
 def build() -> tuple[Path, Path]:
     profile = json.loads((ROOT / "config" / "profile.json").read_text(encoding="utf-8"))
-    resume_text = extract_docx_text(Path(r"C:\Users\acdde\Downloads\Albert Deluna ResumeV1.docx"))
+    resume_text = extract_docx_text(Path(r"C:\path\to\resume.docx"))
     records: list[dict] = []
 
     for selected in SELECTED:

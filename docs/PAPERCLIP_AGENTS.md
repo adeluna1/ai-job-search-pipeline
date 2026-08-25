@@ -84,7 +84,7 @@ Do not put demographic, disability, veteran, or other voluntary self-identificat
 For a safe offline contract test that never opens a site or submits anything:
 
 ```powershell
-.\run.ps1 agent-demo --resume "C:\Users\acdde\Downloads\Albert Deluna ResumeV1.docx"
+.\run.ps1 agent-demo --resume "C:\path\to\resume.docx"
 ```
 
 Expected final state: Agent A identifies the aligned fixture, Agent B recommends it, and Agent C returns `awaiting_review` with `approval=pending`.
