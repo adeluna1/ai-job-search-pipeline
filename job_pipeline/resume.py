@@ -30,8 +30,12 @@ def extract_docx_text(path: Path) -> str:
     except (zipfile.BadZipFile, KeyError, OSError) as exc:
         raise ResumeError(f"Could not read DOCX: {exc}") from exc
 
+    if b"<!DOCTYPE" in xml.upper() or b"<!ENTITY" in xml.upper():
+        raise ResumeError("Word document XML declarations are not allowed.")
+
     try:
-        root = ElementTree.fromstring(xml)
+        # DTD and entity declarations are rejected before the parser sees the bytes.
+        root = ElementTree.fromstring(xml)  # nosec B314
     except ElementTree.ParseError as exc:
         raise ResumeError(f"Invalid Word document XML: {exc}") from exc
 

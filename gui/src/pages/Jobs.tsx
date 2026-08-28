@@ -95,12 +95,14 @@ export default function Jobs() {
                       <td key={c.key} className="max-w-56 truncate p-2" title={r[c.key]}>
                         {c.key === 'url' ? (
                           r.url ? (
-                            <button
-                              onClick={() => void api.externalOpen(r.url)}
+                            <a
+                              href={r.url}
+                              target="_blank"
+                              rel="noreferrer"
                               className="text-cyan-400 hover:underline"
                             >
                               open
-                            </button>
+                            </a>
                           ) : (
                             ''
                           )

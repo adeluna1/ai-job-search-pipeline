@@ -1,22 +1,35 @@
-// AI Job Search Pipeline — Electron main process
-const { app, BrowserWindow, dialog, ipcMain, session, shell } = require('electron');
+// Expedient Employment — Electron main process
+const {
+  app,
+  BrowserWindow,
+  ipcMain,
+  safeStorage,
+  session,
+  shell,
+} = require('electron');
 const path = require('path');
-const os = require('os');
 const fs = require('fs');
 const http = require('http');
 const { spawn } = require('child_process');
 const {
-  DEFAULT_LOCATIONS,
-  DEFAULT_QUERY,
-  buildPipelineSearchArgs,
-  isAllowedSessionUrl,
+  isAllowedWebviewUrl,
+  validateApplicationIdentity,
+  validateApplicationMutation,
 } = require('./safety.cjs');
+const {
+  ControlServiceManager,
+  packagedPipelineRoot,
+} = require('./control-service.cjs');
+const { ProviderCredentialStore } = require('./provider-credential-store.cjs');
 
-const DEVELOPMENT_PIPELINE_ROOT = path.resolve(__dirname, '..', '..');
-let PIPELINE_ROOT = DEVELOPMENT_PIPELINE_ROOT;
+const PIPELINE_ROOT = app.isPackaged
+  ? packagedPipelineRoot(process.resourcesPath)
+  : path.resolve(__dirname, '..', '..');
 const GUI_ROOT = path.resolve(__dirname, '..');
 
 let mainWindow = null;
+const controlService = new ControlServiceManager();
+let providerCredentialStore = null;
 // child processes spawned by this app instance (killed on quit)
 const spawnedChildren = new Set();
 
@@ -33,91 +46,11 @@ if (!gotLock) {
   });
 }
 
-function isPipelineRoot(candidate) {
-  if (!candidate) return false;
-  const resolved = path.resolve(candidate);
-  return (
-    fs.existsSync(path.join(resolved, 'run.ps1'))
-    && fs.existsSync(path.join(resolved, 'job_pipeline'))
-    && fs.existsSync(path.join(resolved, 'config', 'profile.json'))
-  );
-}
-
-function findWorkspacePipelineRoot() {
-  const candidates = [
-    process.env.AI_JOB_PIPELINE_ROOT,
-    path.resolve(path.dirname(process.execPath), '..', '..', '..'),
-  ].filter(Boolean);
-  return candidates.find((candidate) => (
-    isPipelineRoot(candidate)
-    && fs.existsSync(path.join(path.resolve(candidate), 'data', 'applied_jobs.json'))
-  )) || '';
-}
-
-function preparePipelineRoot() {
-  if (!app.isPackaged) return DEVELOPMENT_PIPELINE_ROOT;
-  const workspace = findWorkspacePipelineRoot();
-  if (workspace) return path.resolve(workspace);
-  const bundled = path.join(process.resourcesPath, 'pipeline');
-  const runtime = path.join(app.getPath('userData'), 'pipeline');
-  fs.mkdirSync(runtime, { recursive: true });
-
-  for (const directory of ['job_pipeline', 'scripts', 'docs']) {
-    const source = path.join(bundled, directory);
-    if (fs.existsSync(source)) {
-      fs.cpSync(source, path.join(runtime, directory), { recursive: true, force: true });
-    }
-  }
-  for (const file of ['run.ps1', 'run.cmd', 'pyproject.toml', 'README.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md']) {
-    const source = path.join(bundled, file);
-    if (fs.existsSync(source)) fs.copyFileSync(source, path.join(runtime, file));
-  }
-  const bundledConfig = path.join(bundled, 'config');
-  const runtimeConfig = path.join(runtime, 'config');
-  fs.mkdirSync(runtimeConfig, { recursive: true });
-  if (fs.existsSync(bundledConfig)) {
-    for (const item of fs.readdirSync(bundledConfig)) {
-      const destination = path.join(runtimeConfig, item);
-      if (!fs.existsSync(destination)) {
-        fs.copyFileSync(path.join(bundledConfig, item), destination);
-      }
-    }
-  }
-  fs.mkdirSync(path.join(runtime, 'data'), { recursive: true });
-  fs.mkdirSync(path.join(runtime, 'reports'), { recursive: true });
-  return runtime;
-}
-
-function isSafeExternalUrl(rawUrl) {
-  try {
-    return new URL(rawUrl).protocol === 'https:';
-  } catch {
-    return false;
-  }
-}
-
-function hardenSessionContents(contents) {
-  contents.on('will-navigate', (event, url) => {
-    if (!isAllowedSessionUrl(url)) event.preventDefault();
-  });
-  contents.setWindowOpenHandler(({ url }) => (
-    isAllowedSessionUrl(url)
-      ? {
-          action: 'allow',
-          overrideBrowserWindowOptions: {
-            width: 620, height: 760,
-            webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
-          },
-        }
-      : { action: 'deny' }
-  ));
-}
-
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1440,
     height: 900,
-    title: 'AI Job Search Pipeline',
+    title: 'Expedient Employment',
     icon: path.join(GUI_ROOT, 'build', 'icon.png'),
     backgroundColor: '#0f172a',
     webPreferences: {
@@ -126,35 +59,17 @@ function createWindow() {
       nodeIntegration: false,
       sandbox: true,
       webviewTag: true,
+      webSecurity: true,
+      allowRunningInsecureContent: false,
+      navigateOnDragDrop: false,
     },
   });
 
-  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-  mainWindow.webContents.on('will-attach-webview', (event, webPreferences, params) => {
-    if (!isAllowedSessionUrl(params.src)) {
-      event.preventDefault();
-      return;
-    }
-    delete webPreferences.preload;
-    webPreferences.nodeIntegration = false;
-    webPreferences.contextIsolation = true;
-    webPreferences.sandbox = true;
-  });
-  mainWindow.webContents.on('did-attach-webview', (_event, contents) => {
-    hardenSessionContents(contents);
-    contents.on('did-create-window', (child) => hardenSessionContents(child.webContents));
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (isAllowedWebviewUrl(url)) void shell.openExternal(url);
+    return { action: 'deny' };
   });
 
-  const lockedSessions = [
-    session.defaultSession,
-    session.fromPartition('persist:ai-job-search-browser'),
-  ];
-  for (const browserSession of lockedSessions) {
-    browserSession.setPermissionRequestHandler(
-      (_contents, _permission, callback) => callback(false),
-    );
-    browserSession.setPermissionCheckHandler(() => false);
-  }
   mainWindow.on('closed', () => { mainWindow = null; });
 
   if (process.env.ELECTRON_DEV === '1') {
@@ -164,11 +79,43 @@ function createWindow() {
   }
 }
 
-app.setAppUserModelId('com.albertdeluna.aijobsearch');
+app.setAppUserModelId('com.expedient.employment');
 app.whenReady().then(() => {
-  PIPELINE_ROOT = preparePipelineRoot();
+  providerCredentialStore = new ProviderCredentialStore({
+    userDataPath: app.getPath('userData'),
+    safeStorage,
+    environment: process.env,
+  });
+  if (!providerCredentialStore.credential()) {
+    providerCredentialStore.importFromEnvironment();
+  }
+  session.defaultSession.setPermissionRequestHandler(
+    (_webContents, _permission, callback) => callback(false),
+  );
+  app.on('web-contents-created', (_event, contents) => {
+    contents.on('will-attach-webview', (attachEvent, webPreferences, params) => {
+      delete webPreferences.preload;
+      webPreferences.nodeIntegration = false;
+      webPreferences.contextIsolation = true;
+      webPreferences.sandbox = true;
+      webPreferences.webSecurity = true;
+      if (!isAllowedWebviewUrl(params.src)) attachEvent.preventDefault();
+    });
+    if (contents.getType() === 'webview') {
+      contents.on('will-navigate', (navigateEvent, url) => {
+        if (!isAllowedWebviewUrl(url)) navigateEvent.preventDefault();
+      });
+      contents.setWindowOpenHandler(({ url }) => {
+        if (isAllowedWebviewUrl(url)) void shell.openExternal(url);
+        return { action: 'deny' };
+      });
+    }
+  });
+  // best-effort, non-blocking backend auto-launch (never blocks window creation)
+  void startPaperclip().catch(() => {});
+  void startResumeMatcher().catch(() => {});
+  void ensureControlService().catch(() => {});
   createWindow();
-  // Services and searches remain explicit user actions.
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
@@ -178,6 +125,7 @@ app.on('window-all-closed', () => { app.quit(); });
 // kill only the child processes this instance spawned (Paperclip node).
 // Docker containers and pre-existing services are left running.
 app.on('before-quit', () => {
+  void controlService.stop().catch(() => {});
   for (const child of spawnedChildren) {
     try { child.kill(); } catch { /* already gone */ }
   }
@@ -218,6 +166,55 @@ function resolvePowerShell() {
 function resolveNode() {
   if (process.env.NODE_EXE) return process.env.NODE_EXE;
   return process.platform === 'win32' ? 'node.exe' : 'node';
+}
+
+function resolvePython() {
+  if (process.env.PYTHON_EXE) return process.env.PYTHON_EXE;
+  return findOnPath('python') || findOnPath('python3') || 'python';
+}
+
+function controlServiceOptions() {
+  const credential = providerCredentialStore ? providerCredentialStore.credential() : null;
+  return {
+    pythonExecutable: resolvePython(),
+    projectRoot: PIPELINE_ROOT,
+    dataRoot: path.join(app.getPath('userData'), 'control'),
+    nodeExecutable: process.execPath,
+    providerEnv: {
+      EXPEDIENT_PROVIDER_URL: 'http://127.0.0.1:4853/v1',
+      EXPEDIENT_PROVIDER_KEY_ENV: 'FREECHAIN_ACCESS_KEY',
+      FREECHAIN_ACCESS_KEY: credential || '',
+    },
+  };
+}
+
+async function ensureControlService() {
+  const status = controlService.status();
+  if (status.ready) return status;
+  return controlService.start(controlServiceOptions());
+}
+
+function providerCredentialStatus() {
+  if (!providerCredentialStore) {
+    return { configured: false, saved: false, source: 'unavailable' };
+  }
+  const status = providerCredentialStore.status();
+  return {
+    configured: status.available,
+    saved: providerCredentialStore.saved(),
+    source: status.source,
+  };
+}
+
+async function restartOwnedControlService() {
+  try {
+    await controlService.restart(controlServiceOptions());
+  } catch { /* status stays credential-only */ }
+}
+
+async function controlRequest(method, requestPath, payload) {
+  await ensureControlService();
+  return controlService.request(method, requestPath, payload);
 }
 
 function sleep(ms) {
@@ -380,21 +377,6 @@ function readJsonSafe(relPath) {
   }
 }
 
-function defaultResumePath() {
-  const profile = readJsonSafe(path.join('config', 'profile.json'));
-  const configuredName = profile.data
-    && profile.data.source
-    && profile.data.source.resume_file_name
-    ? String(profile.data.source.resume_file_name)
-    : 'resume.docx';
-  const candidates = [
-    process.env.JOB_PIPELINE_RESUME,
-    path.join(os.homedir(), 'Downloads', configuredName),
-    path.join(PIPELINE_ROOT, 'private', 'resume.docx'),
-  ].filter(Boolean);
-  return candidates.find((candidate) => fs.existsSync(candidate)) || '';
-}
-
 // Only these config files may be read/written through config:* channels.
 const CONFIG_ALLOWLIST = new Set([
   'profile.json',
@@ -475,9 +457,6 @@ ipcMain.handle('services', async () => {
 // services:start — (re)attempt to launch one or all backend services.
 ipcMain.handle('services:start', async (_e, payload) => {
   const service = payload && payload.service ? String(payload.service) : 'all';
-  if (!new Set(['paperclip', 'resume-matcher', 'all']).has(service)) {
-    return { error: 'unsupported service: ' + service };
-  }
   const result = {};
   if (service === 'paperclip' || service === 'all') {
     result.paperclip = await startPaperclip();
@@ -489,32 +468,26 @@ ipcMain.handle('services:start', async (_e, payload) => {
 });
 
 ipcMain.handle('search:spawn', async (event, args) => {
-  try {
-    const agentRun = path.join(PIPELINE_ROOT, 'scripts', 'agent-run.ps1');
-    const { args: psArgs, safe } = buildPipelineSearchArgs(agentRun, args || {});
-    if (!safe.resumePath) {
-      throw new Error('Choose the corrected .docx resume before searching.');
-    }
-    if (safe.resumePath && !fs.existsSync(safe.resumePath)) {
-      throw new Error('The selected resume file does not exist.');
-    }
-    const wc = event.sender;
-    const result = await runPowerShell(psArgs, {
-      onLine: (line, stream) => {
-        if (!wc.isDestroyed()) wc.send('search:log', { line, stream });
-      },
-    });
-    return { ...result, search: safe };
-  } catch (err) {
-    return {
-      code: -1,
-      output: 'Search validation failed: ' + String(err.message || err),
-    };
-  }
+  const a = args || {};
+  const psArgs = [
+    '-File', path.join(PIPELINE_ROOT, 'scripts', 'agent-run.ps1'),
+    'agent-a-find',
+    '--query', String(a.query || 'Recruiting Coordinator'),
+    '--location', String(a.location || 'San Francisco, CA'),
+    '--hours-old', String(a.hoursOld ?? 720),
+    '--results-wanted', String(a.resultsWanted ?? 10),
+    '--concurrency', String(a.concurrency ?? 3),
+  ];
+  const wc = event.sender;
+  return runPowerShell(psArgs, {
+    onLine: (line, stream) => {
+      if (!wc.isDestroyed()) wc.send('search:log', { line, stream });
+    },
+  });
 });
 
 ipcMain.handle('jobs:read', async () => {
-  const p = path.join(PIPELINE_ROOT, 'reports', 'job_matches_verified.csv');
+  const p = path.join(PIPELINE_ROOT, 'reports', 'job_matches.csv');
   try {
     const text = fs.readFileSync(p, 'utf8');
     return { exists: true, rows: parseCsv(text), path: p };
@@ -530,46 +503,43 @@ ipcMain.handle('report:open', async () => {
   return { ok: result === '', error: result || null, path: p };
 });
 
-ipcMain.handle('applications:refresh', async () => {
-  return runPowerShell(['-File', path.join(PIPELINE_ROOT, 'run.ps1'), 'applications-report']);
-});
-
-ipcMain.handle('applications:flag', async (_event, payload) => {
-  const identityKey = String(payload && payload.identityKey ? payload.identityKey : '');
-  const flag = String(payload && payload.flag ? payload.flag : '');
-  if (!/^[0-9a-f]{16}$/.test(identityKey)) {
-    return { code: -1, output: 'Invalid application identity.' };
-  }
-  if (!new Set(['interview', 'denied', 'not_selected']).has(flag)) {
-    return { code: -1, output: 'Invalid application outcome flag.' };
-  }
-  return runPowerShell([
-    '-File', path.join(PIPELINE_ROOT, 'run.ps1'),
-    'application-flag', identityKey, flag,
-  ]);
-});
-
-ipcMain.handle('applications:undo', async (_event, payload) => {
-  const identityKey = String(payload && payload.identityKey ? payload.identityKey : '');
-  if (!/^[0-9a-f]{16}$/.test(identityKey)) {
-    return { code: -1, output: 'Invalid application identity.' };
-  }
-  return runPowerShell([
-    '-File', path.join(PIPELINE_ROOT, 'run.ps1'),
-    'application-undo', identityKey,
-  ]);
-});
+ipcMain.handle('applications:refresh', async () => (
+  runPowerShell(['-File', path.join(PIPELINE_ROOT, 'run.ps1'), 'applications-report'])
+));
 
 ipcMain.handle('applications:read', async () => {
   const result = readJsonSafe(path.join('reports', 'applications_dashboard.json'));
+  const data = result.data && typeof result.data === 'object' ? result.data : {};
   return {
     exists: result.exists,
-    summary: result.data && result.data.summary ? result.data.summary : {},
-    applications: result.data && Array.isArray(result.data.applications)
-      ? result.data.applications
-      : [],
+    summary: data.summary && typeof data.summary === 'object' ? data.summary : {},
+    applications: Array.isArray(data.applications) ? data.applications : [],
     error: result.error || null,
   };
+});
+
+ipcMain.handle('applications:flag', async (_event, payload) => {
+  try {
+    const { identityKey, flag } = validateApplicationMutation(payload);
+    return runPowerShell([
+      '-File', path.join(PIPELINE_ROOT, 'run.ps1'),
+      'application-flag', identityKey, flag,
+    ]);
+  } catch (err) {
+    return { code: -1, output: String(err.message || err) };
+  }
+});
+
+ipcMain.handle('applications:undo', async (_event, payload) => {
+  try {
+    const identityKey = validateApplicationIdentity(payload && payload.identityKey);
+    return runPowerShell([
+      '-File', path.join(PIPELINE_ROOT, 'run.ps1'),
+      'application-undo', identityKey,
+    ]);
+  } catch (err) {
+    return { code: -1, output: String(err.message || err) };
+  }
 });
 
 ipcMain.handle('applications:report-open', async () => {
@@ -578,34 +548,6 @@ ipcMain.handle('applications:report-open', async () => {
   return { ok: result === '', error: result || null, path: reportPath };
 });
 
-ipcMain.handle('app:info', async () => ({
-  packaged: app.isPackaged,
-  pipelineRoot: PIPELINE_ROOT,
-  defaultQuery: DEFAULT_QUERY,
-  defaultLocations: DEFAULT_LOCATIONS,
-  defaultResumePath: defaultResumePath(),
-}));
-
-ipcMain.handle('resume:pick', async () => {
-  const result = await dialog.showOpenDialog(mainWindow, {
-    title: 'Choose the corrected resume',
-    properties: ['openFile'],
-    filters: [{ name: 'Word document', extensions: ['docx'] }],
-  });
-  if (result.canceled || result.filePaths.length === 0) {
-    return { canceled: true, path: '' };
-  }
-  return { canceled: false, path: result.filePaths[0] };
-});
-
-ipcMain.handle('external:open', async (_event, rawUrl) => {
-  const url = String(rawUrl || '');
-  if (!isSafeExternalUrl(url)) {
-    return { ok: false, error: 'Only HTTPS links may be opened externally.' };
-  }
-  await shell.openExternal(url);
-  return { ok: true };
-});
 ipcMain.handle('agents:list', async () => {
   const base = 'http://127.0.0.1:3100';
   const companiesRes = await httpGetJson(`${base}/api/companies`);
@@ -691,9 +633,114 @@ ipcMain.handle('login:url', async (_e, siteKey) => {
   const res = readJsonSafe(path.join('config', 'access_policy.json'));
   const site = res.data && res.data.session_sites && res.data.session_sites[siteKey];
   if (!site || !site.login_url) return { ok: false, error: `no login_url for site "${siteKey}"` };
-  const url = String(site.login_url);
-  if (!isAllowedSessionUrl(url)) {
-    return { ok: false, error: 'configured login URL is outside the reviewed domain allowlist' };
-  }
-  return { ok: true, url };
+  return { ok: true, url: site.login_url };
 });
+
+// Authenticated control service. Renderer methods map to fixed API routes and
+// never receive the service bearer token.
+function controlSafeId(value, label = 'identifier') {
+  const text = String(value || '');
+  if (!/^[A-Za-z0-9_-]{1,160}$/.test(text)) throw new Error(`Invalid ${label}.`);
+  return text;
+}
+
+function controlScheduleId(value) {
+  const parsed = Number.parseInt(String(value), 10);
+  if (!Number.isInteger(parsed) || parsed < 1) throw new Error('Invalid schedule identifier.');
+  return parsed;
+}
+
+ipcMain.handle('control:status', async () => {
+  try {
+    return await ensureControlService();
+  } catch (err) {
+    return { ready: false, port: null, error: String(err.message || err) };
+  }
+});
+ipcMain.handle('provider-credential:status', () => providerCredentialStatus());
+ipcMain.handle('provider-credential:reimport', async () => {
+  if (providerCredentialStore) providerCredentialStore.reimportFromEnvironment();
+  await restartOwnedControlService();
+  return providerCredentialStatus();
+});
+ipcMain.handle('provider-credential:clear', async () => {
+  const cleared = providerCredentialStore ? providerCredentialStore.clear() : false;
+  if (cleared) await restartOwnedControlService();
+  return providerCredentialStatus();
+});
+ipcMain.handle('assistant:providers', () => controlRequest('GET', '/v1/providers'));
+ipcMain.handle('assistant:models', (_event, provider) => (
+  controlRequest('GET', `/v1/providers/${controlSafeId(provider, 'provider')}/models`)
+));
+ipcMain.handle('assistant:conversations', () => controlRequest('GET', '/v1/conversations'));
+ipcMain.handle('assistant:create', (_event, payload) => (
+  controlRequest('POST', '/v1/conversations', payload || {})
+));
+ipcMain.handle('assistant:messages', (_event, conversationId) => (
+  controlRequest('GET', `/v1/conversations/${controlSafeId(conversationId)}/messages`)
+));
+ipcMain.handle('assistant:queue', (_event, conversationId) => (
+  controlRequest('GET', `/v1/conversations/${controlSafeId(conversationId)}/queue`)
+));
+ipcMain.handle('assistant:events', (_event, conversationId) => (
+  controlRequest('GET', `/v1/conversations/${controlSafeId(conversationId)}/events`)
+));
+ipcMain.handle('assistant:attach', (_event, conversationId, payload) => (
+  controlRequest(
+    'POST',
+    `/v1/conversations/${controlSafeId(conversationId)}/attachments`,
+    payload || {},
+  )
+));
+ipcMain.handle('assistant:send', (_event, conversationId, payload) => (
+  controlRequest(
+    'POST',
+    `/v1/conversations/${controlSafeId(conversationId)}/messages`,
+    payload || {},
+  )
+));
+ipcMain.handle('assistant:run', (_event, conversationId) => (
+  controlRequest('POST', `/v1/conversations/${controlSafeId(conversationId)}/run`, {})
+));
+ipcMain.handle('assistant:edit', (_event, messageId, content) => (
+  controlRequest('PATCH', `/v1/messages/${controlSafeId(messageId)}`, { content })
+));
+ipcMain.handle('assistant:cancel', (_event, messageId) => (
+  controlRequest('POST', `/v1/messages/${controlSafeId(messageId)}/cancel`, {})
+));
+ipcMain.handle('assistant:retry', (_event, messageId) => (
+  controlRequest('POST', `/v1/messages/${controlSafeId(messageId)}/retry`, {})
+));
+ipcMain.handle('assistant:clear', (_event, conversationId) => (
+  controlRequest('DELETE', `/v1/conversations/${controlSafeId(conversationId)}/messages`)
+));
+ipcMain.handle('tools:list', () => controlRequest('GET', '/v1/tools'));
+ipcMain.handle('workflows:dry-run', (_event, payload) => (
+  controlRequest('POST', '/v1/workflows/dry-run', payload || {})
+));
+ipcMain.handle('workflows:run', (_event, payload) => (
+  controlRequest('POST', '/v1/workflows/run', payload || {})
+));
+ipcMain.handle('schedules:list', () => controlRequest('GET', '/v1/schedules'));
+ipcMain.handle('schedules:create', (_event, payload) => (
+  controlRequest('POST', '/v1/schedules', payload || {})
+));
+ipcMain.handle('schedules:toggle', (_event, scheduleId, enabled) => (
+  controlRequest(
+    'POST',
+    `/v1/schedules/${controlScheduleId(scheduleId)}/enabled`,
+    { enabled: Boolean(enabled) },
+  )
+));
+ipcMain.handle('schedules:run-due', () => controlRequest('POST', '/v1/schedules/run-due', {}));
+ipcMain.handle('schedules:history', (_event, scheduleId) => (
+  controlRequest('GET', `/v1/schedules/${controlScheduleId(scheduleId)}/history`)
+));
+ipcMain.handle('schedules:install-wake', () => (
+  runPowerShell([
+    '-File', path.join(PIPELINE_ROOT, 'scripts', 'install-scheduler.ps1'),
+    '-Action', 'Install',
+    '-ProjectRoot', PIPELINE_ROOT,
+    '-DataRoot', path.join(app.getPath('userData'), 'control'),
+  ])
+));

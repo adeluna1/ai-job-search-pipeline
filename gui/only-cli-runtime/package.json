@@ -1,0 +1,10 @@
+{
+  "name": "expedient-only-cli-runtime",
+  "private": true,
+  "version": "1.0.0",
+  "license": "MIT",
+  "description": "Pinned MIT only-cli runtime for Expedient Employment agent tools.",
+  "dependencies": {
+    "@only-cli/oc": "git+https://github.com/only-cli/oc.git#7f1f109b8e34dcfc2bfb56122a427f3c467a79ca"
+  }
+}

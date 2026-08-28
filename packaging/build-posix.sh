@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds the AI Job Search Pipeline macOS / Linux release artifacts.
+# Builds the Expedient Employment macOS / Linux release artifacts.
 #
 #   ./packaging/build-posix.sh          # auto-detect host platform
 #   ./packaging/build-posix.sh mac      # macOS targets (dmg, zip)  — must run on macOS
@@ -40,7 +40,7 @@ if [ -z "$VERSION" ]; then
   echo "Could not read the version from gui/package.json (is Node.js installed?)." >&2
   exit 1
 fi
-echo "Building AI Job Search Pipeline $VERSION for $TARGET"
+echo "Building Expedient Employment $VERSION for $TARGET"
 
 cd "$GUI_DIR"
 if [ ! -d node_modules ]; then

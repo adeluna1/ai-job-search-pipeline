@@ -349,7 +349,7 @@ def build() -> tuple[Path, Path]:
             f"{item['window']} - {item['verification']}"
         )
         record["notes"] = (
-            "Resume-weighted against Albert Deluna's corrected resume. "
+            "Resume-weighted against the candidate's corrected resume. "
             f"{item['verification']}"
         )
         records.append(record)
@@ -369,7 +369,7 @@ def build() -> tuple[Path, Path]:
         title="Fresh Bay Area & San Jose recruiting roles",
         subtitle=(
             "New onsite, hybrid, and remote recruiting roles shown within the last "
-            "24 hours or 3 days, weighted against Albert Deluna's corrected resume. "
+            "24 hours or 3 days, weighted against the candidate's corrected resume. "
             "Previously sent and applied roles are excluded. JobSpy attempted LinkedIn, "
             "Indeed, Glassdoor, and ZipRecruiter; protected-board gaps were routed through "
             "WebClaw and authenticated browser coverage. Relative board ages are labeled."

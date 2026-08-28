@@ -8,11 +8,11 @@ import { api, isDesktop } from '@/lib/api';
 import type { JobRow, SearchLogPayload } from '@/lib/api';
 
 export default function Search() {
-  const [query, setQuery] = useState('');
-  const [locationsText, setLocationsText] = useState('');
-  const [freshHours, setFreshHours] = useState<24 | 72 | 168 | 336>(168);
-  const [concurrency, setConcurrency] = useState(4);
-  const [resumePath, setResumePath] = useState('');
+  const [query, setQuery] = useState('Recruiting Coordinator');
+  const [location, setLocation] = useState('San Francisco, CA');
+  const [hoursOld, setHoursOld] = useState(720);
+  const [resultsWanted, setResultsWanted] = useState(10);
+  const [concurrency, setConcurrency] = useState(3);
   const [running, setRunning] = useState(false);
   const [log, setLog] = useState<string[]>([]);
   const [exitCode, setExitCode] = useState<number | null>(null);
@@ -27,14 +27,6 @@ export default function Search() {
   }, []);
 
   useEffect(() => {
-    api.appInfo().then((info) => {
-      setQuery(info.defaultQuery);
-      setLocationsText(info.defaultLocations.join('; '));
-      setResumePath(info.defaultResumePath);
-    });
-  }, []);
-
-  useEffect(() => {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
   }, [log]);
 
@@ -44,14 +36,7 @@ export default function Search() {
     setExitCode(null);
     setRows(null);
     try {
-      const locations = locationsText
-        .split(/[\n;]+/)
-        .map((value) => value.trim())
-        .filter(Boolean);
-      const res = await api.searchSpawn({
-        query, locations, freshHours, resultsWanted: 10, concurrency, resumePath,
-      });
-      if (res.output && res.code !== 0) setLog((prev) => [...prev, res.output]);
+      const res = await api.searchSpawn({ query, location, hoursOld, resultsWanted, concurrency });
       setExitCode(res.code);
       const jobs = await api.jobsRead();
       setRows(jobs.rows);
@@ -79,33 +64,29 @@ export default function Search() {
               />
             </div>
             <div className="space-y-1">
-              <Label className="text-slate-300">Locations (semicolon separated)</Label>
+              <Label className="text-slate-300">Location</Label>
               <Input
-                value={locationsText}
-                onChange={(e) => setLocationsText(e.target.value)}
+                value={location}
+                onChange={(e) => setLocation(e.target.value)}
                 className="border-slate-700 bg-slate-950 text-slate-200"
               />
             </div>
             <div className="space-y-1">
-              <Label className="text-slate-300">Freshness window</Label>
-              <select
-                value={freshHours}
-                onChange={(e) => setFreshHours(Number(e.target.value) as 24 | 72 | 168 | 336)}
+              <Label className="text-slate-300">Hours old</Label>
+              <Input
+                type="number"
+                value={hoursOld}
+                onChange={(e) => setHoursOld(Number(e.target.value))}
                 className="border-slate-700 bg-slate-950 text-slate-200"
-              >
-                <option value={24}>Last 24 hours</option>
-                <option value={72}>Last 3 days</option>
-                <option value={168}>Last 7 days (daily recommended)</option>
-                <option value={336}>Last 14 days (weekly expansion)</option>
-              </select>
+              />
             </div>
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-1">
-                <Label className="text-slate-300">Maximum results</Label>
+                <Label className="text-slate-300">Results</Label>
                 <Input
-                  type="text"
-                  value="10 (hard cap)"
-                  disabled
+                  type="number"
+                  value={resultsWanted}
+                  onChange={(e) => setResultsWanted(Number(e.target.value))}
                   className="border-slate-700 bg-slate-950 text-slate-200"
                 />
               </div>
@@ -120,32 +101,10 @@ export default function Search() {
               </div>
             </div>
           </div>
-          <div className="space-y-1">
-            <Label className="text-slate-300">Corrected resume used for scoring</Label>
-            <div className="flex gap-2">
-              <Input
-                value={resumePath}
-                readOnly
-                placeholder="Choose the corrected .docx resume"
-                className="border-slate-700 bg-slate-950 text-slate-200"
-              />
-              <Button
-                type="button"
-                variant="outline"
-                onClick={async () => {
-                  const picked = await api.resumePick();
-                  if (!picked.canceled) setResumePath(picked.path);
-                }}
-                disabled={!isDesktop}
-              >
-                Browse
-              </Button>
-            </div>
-          </div>
           <div className="flex items-center gap-3">
             <Button
               onClick={run}
-              disabled={running || !isDesktop || !resumePath}
+              disabled={running || !isDesktop}
               className="bg-cyan-500 text-slate-950 hover:bg-cyan-400"
             >
               <Play className="mr-2 h-4 w-4" />

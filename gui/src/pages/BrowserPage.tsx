@@ -79,7 +79,7 @@ export default function BrowserPage() {
       </div>
 
       <div className="rounded-md border border-cyan-900/50 bg-cyan-950/20 px-4 py-2 text-xs text-cyan-300">
-        Log in once — sessions persist locally (partition <code>persist:ai-job-search-browser</code>).
+        Log in once — sessions persist locally (partition <code>persist:ee-browser</code>).
       </div>
 
       <div className="flex items-center gap-2">
@@ -132,7 +132,7 @@ export default function BrowserPage() {
             className="text-slate-300 hover:bg-slate-800"
             onClick={() => {
               const url = wv?.getURL?.() ?? urls[active];
-              if (url) void api.externalOpen(url);
+              if (url) window.open(url, '_blank');
             }}
           >
             <ExternalLink className="h-4 w-4" />
@@ -151,7 +151,7 @@ export default function BrowserPage() {
                     webviewRefs.current[t.key] = el as WebviewElement | null;
                   }}
                   src={urls[t.key] ?? t.fallbackUrl}
-                  partition="persist:ai-job-search-browser"
+                  partition="persist:ee-browser"
                   className="absolute inset-0 h-full w-full"
                   style={{ display: active === t.key ? 'flex' : 'none' }}
                 />

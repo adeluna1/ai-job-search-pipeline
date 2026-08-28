@@ -6,6 +6,9 @@ const {
   DEFAULT_QUERY,
   buildPipelineSearchArgs,
   isAllowedSessionUrl,
+  isAllowedWebviewUrl,
+  validateApplicationIdentity,
+  validateApplicationMutation,
   validateSearchArgs,
 } = require('./safety.cjs');
 
@@ -65,4 +68,34 @@ test('embedded browser allows exact sites and trusted identity providers only', 
 test('unsafe search strings and non-docx resumes are rejected', () => {
   assert.throws(() => validateSearchArgs({ query: 'Recruiter\nInjected' }), /control/);
   assert.throws(() => validateSearchArgs({ resumePath: 'resume.pdf' }), /\.docx/);
+});
+
+test('webview policy permits only local services or approved session sites', () => {
+  assert.equal(isAllowedWebviewUrl('http://127.0.0.1:3000/'), true);
+  assert.equal(isAllowedWebviewUrl('http://localhost:3100/api/health'), true);
+  assert.equal(isAllowedWebviewUrl('https://www.indeed.com/jobs?q=recruiter'), true);
+  assert.equal(isAllowedWebviewUrl('http://127.0.0.1:7896/health'), false);
+  assert.equal(isAllowedWebviewUrl('http://localhost:3100.evil.example/'), false);
+  assert.equal(isAllowedWebviewUrl('https://example.com/'), false);
+  assert.equal(isAllowedWebviewUrl('javascript:alert(1)'), false);
+});
+
+test('application outcome mutations accept only bounded identities and flags', () => {
+  assert.equal(validateApplicationIdentity('ABCDEF0123456789'), 'abcdef0123456789');
+  assert.deepEqual(
+    validateApplicationMutation({
+      identityKey: '0123456789abcdef',
+      flag: 'interview',
+    }),
+    { identityKey: '0123456789abcdef', flag: 'interview' },
+  );
+  assert.throws(
+    () => validateApplicationMutation({ identityKey: '../reports', flag: 'interview' }),
+    /identity/,
+  );
+  assert.throws(() => validateApplicationIdentity(''), /identity/);
+  assert.throws(
+    () => validateApplicationMutation({ identityKey: '0123456789abcdef', flag: 'submitted' }),
+    /outcome/,
+  );
 });

@@ -148,7 +148,7 @@ def build() -> tuple[Path, Path]:
                 f"{selection['window']} • {verification}."
             )
             record["notes"] = (
-                "Resume-weighted against Albert Deluna's corrected resume. "
+                "Resume-weighted against the candidate's corrected resume. "
                 f"{verification}."
             )
             records.append(record)
@@ -171,7 +171,7 @@ def build() -> tuple[Path, Path]:
         title="Bay Area recruiting coordinator matches",
         subtitle=(
             "Recruiting coordination roles found in the last 24 hours or 3 days, "
-            "ranked against Albert Deluna's corrected resume. Reposts are labeled."
+            "ranked against the candidate's corrected resume. Reposts are labeled."
         ),
     )
 

@@ -1,6 +1,6 @@
 {
   "repository": "https://github.com/BarnsL/agent-web-browser.git",
-  "commit": "d08856d9fda3a7273d8f732e9c6be6fb16f9f12d",
+  "commit": "cf96d04c6f2e369a4574786f75957c040cb7bf9f",
   "base_url": "http://127.0.0.1:7896",
   "mode": "read_only_job_board_fallback",
   "supported_boards": [

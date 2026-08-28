@@ -5,7 +5,7 @@
 [![Python](https://img.shields.io/badge/python-3.10%2B-15324a)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-cc8b19)](LICENSE)
 
-A local-first pipeline tailored to Albert Deluna's recruiting-operations resume. [Paperclip](https://github.com/paperclipai/paperclip) coordinates three specialized agents: [JobSpy](https://github.com/speedyapply/JobSpy) supplies multi-board discovery, [WebClaw](https://github.com/0xMassi/webclaw) supplies direct-page extraction and fallback discovery, [Agent Web Browser](https://github.com/BarnsL/agent-web-browser) supplies optional session-aware Glassdoor/ZipRecruiter reads, [Resume-Matcher](https://github.com/srbhr/Resume-Matcher) can add ATS evidence, and [browser-use](https://github.com/browser-use/browser-use) powers an approval-gated application helper.
+A local-first pipeline tailored to the candidate's recruiting-operations resume. [Paperclip](https://github.com/paperclipai/paperclip) coordinates three specialized agents: [JobSpy](https://github.com/speedyapply/JobSpy) supplies multi-board discovery, [WebClaw](https://github.com/0xMassi/webclaw) supplies direct-page extraction and fallback discovery, [Agent Web Browser](https://github.com/BarnsL/agent-web-browser) supplies optional session-aware Glassdoor/ZipRecruiter reads, [Resume-Matcher](https://github.com/srbhr/Resume-Matcher) can add ATS evidence, and [browser-use](https://github.com/browser-use/browser-use) powers an approval-gated application helper.
 
 Sharing this project with another AI assistant? Start with [`README_FOR_AI.md`](README_FOR_AI.md), which contains the architecture, safety boundaries, setup commands, and a copy-paste handoff prompt without private candidate data.
 
@@ -92,7 +92,7 @@ Use `http://127.0.0.1:3000/api/v1` for Agent B. Do not point `--resume-matcher-u
 Run the real pipeline with your resume:
 
 ```powershell
-.\run.ps1 run --resume "C:\path\to\Albert Deluna ResumeV1.docx" --max-jobs 30
+.\run.ps1 run --resume "C:\path\to\resume.docx" --max-jobs 30
 ```
 
 Open `reports\job_matches.html` for every current-run candidate or `reports\job_matches_verified.html` for the Agent B-eligible shortlist. The pipeline never copies the resume; it extracts and redacts contact details in memory.
@@ -153,7 +153,7 @@ retained as manual maintenance utilities, not alternative production graphs.
 .\run.ps1 status JOB_ID applied --notes "Applied through company site"
 
 # Test all three specialist contracts without network access or submission
-.\run.ps1 agent-demo --resume "C:\path\to\Albert Deluna ResumeV1.docx"
+.\run.ps1 agent-demo --resume "C:\path\to\resume.docx"
 
 # Create the ignored, private answer template for Agent C
 .\run.ps1 agent-profile-init

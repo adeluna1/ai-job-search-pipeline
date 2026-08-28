@@ -114,7 +114,7 @@ def build() -> tuple[Path, Path]:
             f"Watch-out: {selected['caution']}"
         )
         record["notes"] = (
-            "Weighted against Albert Deluna's corrected resume. This fail-closed report excludes "
+            "Weighted against the candidate's corrected resume. This fail-closed report excludes "
             "previously applied/sent roles, closed employer pages, stale posts, hybrid roles, and "
             "remote jobs limited to a single state or region."
         )
@@ -129,7 +129,7 @@ def build() -> tuple[Path, Path]:
         title="Live nationwide-remote recruiting coordinator matches",
         subtitle=(
             "Only employer-verified, fully remote US roles discovered or reposted within the last "
-            "seven days. Ranked against Albert Deluna's corrected resume on Aug. 5, 2026. The "
+            "seven days. Ranked against the candidate's corrected resume on Aug. 5, 2026. The "
             "search intentionally returns fewer results instead of including stale or restricted jobs."
         ),
     )

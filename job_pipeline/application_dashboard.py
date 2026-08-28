@@ -247,7 +247,7 @@ def export_application_html(
 <td>{html.escape(str(record["fit_score"]))}</td>
 <td>{html.escape(record["notes"])}</td><td>{link}</td></tr>"""
         )
-    payload = json.dumps(records, ensure_ascii=False).replace("</", "<\/")
+    payload = json.dumps(records, ensure_ascii=False).replace("</", "<\\/")
     generated = utc_now()
     options = "".join(
         f'<option value="{key}">{html.escape(label)}</option>'

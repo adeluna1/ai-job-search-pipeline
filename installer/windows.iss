@@ -1,4 +1,4 @@
-; Inno Setup script for AI Job Search Pipeline (per-user install, no admin required).
+; Inno Setup script for Expedient Employment (per-user install, no admin required).
 ; Packages the electron-builder unpacked output (gui/release/win-unpacked).
 ; Build via packaging/build-windows.ps1, which passes /DAppVersion=<version>.
 
@@ -6,11 +6,13 @@
   #define AppVersion "0.0.0"
 #endif
 
-#define AppName "AI Job Search Pipeline"
-#define AppId "com.albertdeluna.aijobsearch"
-#define AppPublisher "AI Job Search Pipeline contributors"
-#define AppURL "https://github.com/adeluna1/ai-job-search-pipeline"
-#define SourceDir "..\gui\release\win-unpacked"
+#define AppName "Expedient Employment"
+#define AppId "com.expedient.employment"
+#define AppPublisher "Expedient Employment contributors"
+#define AppURL "https://github.com/BarnsL/expedient-employment"
+#ifndef SourceDir
+  #define SourceDir "..\gui\release\win-unpacked"
+#endif
 
 [Setup]
 AppId={{{#AppId}}
@@ -29,7 +31,7 @@ DisableProgramGroupPage=yes
 ; Allow installing over a running app's directory only after it is closed.
 CloseApplications=yes
 OutputDir=..\release
-OutputBaseFilename=AIJobSearchPipeline-Setup-{#AppVersion}
+OutputBaseFilename=ExpedientEmployment-Setup-{#AppVersion}
 SetupIconFile=..\gui\build\icon.ico
 UninstallDisplayIcon={app}\{#AppName}.exe
 Compression=lzma2

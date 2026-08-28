@@ -1,316 +1,303 @@
 import { useEffect, useMemo, useState } from 'react';
-import { ExternalLink, RefreshCw, RotateCcw, Search } from 'lucide-react';
+import { FileText, RefreshCw, RotateCcw, Search } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { api } from '@/lib/api';
-import type { ApplicationDashboardResult, ApplicationOutcomeFlag, ApplicationRecord } from '@/lib/api';
+import type {
+  ApplicationDashboardResult,
+  ApplicationOutcomeFlag,
+  ApplicationRecord,
+} from '@/lib/api';
 
-const EMPTY_SUMMARY = {
-  total: 0,
-  active: 0,
-  interviewing: 0,
-  offers: 0,
-  closed: 0,
-  status_not_recorded: 0,
-  companies: 0,
-  status_counts: {},
+const EMPTY_RESULT: ApplicationDashboardResult = {
+  exists: false,
+  summary: {},
+  applications: [],
 };
 
-const STATUS_ORDER = [
-  'applying', 'applied', 'interviewing', 'offer', 'accepted',
-  'declined', 'rejected', 'withdrawn', 'closed',
+const OUTCOMES: Array<{ value: ApplicationOutcomeFlag; label: string }> = [
+  { value: 'interview', label: 'Interview' },
+  { value: 'denied', label: 'Denied' },
+  { value: 'not_selected', label: 'Not selected' },
 ];
 
-function dateOnly(value: string) {
+function shortDate(value: string) {
   return value ? value.slice(0, 10) : 'Not recorded';
 }
 
 export default function Applications() {
-  const [result, setResult] = useState<ApplicationDashboardResult>({
-    exists: false,
-    summary: EMPTY_SUMMARY,
-    applications: [],
-  });
+  const [result, setResult] = useState<ApplicationDashboardResult>(EMPTY_RESULT);
+  const [loading, setLoading] = useState(true);
+  const [busyIdentity, setBusyIdentity] = useState('');
   const [query, setQuery] = useState('');
   const [status, setStatus] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState('');
-  const [messageIsError, setMessageIsError] = useState(false);
-  const [updatingIdentity, setUpdatingIdentity] = useState('');
-  const [lastChange, setLastChange] = useState<{
-    identityKey: string;
-    company: string;
-    title: string;
-  } | null>(null);
+  const [notice, setNotice] = useState<{ tone: 'good' | 'bad'; text: string } | null>(null);
+  const [undoIdentity, setUndoIdentity] = useState('');
 
   const load = async () => {
-    setResult(await api.applicationsRead());
+    setLoading(true);
+    try {
+      const next = await api.applicationsRead();
+      setResult(next);
+      setNotice(next.error ? { tone: 'bad', text: next.error } : null);
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => {
-    const timer = window.setTimeout(() => void load(), 0);
-    return () => window.clearTimeout(timer);
+    let active = true;
+    void api.applicationsRead().then((next) => {
+      if (!active) return;
+      setResult(next);
+      setNotice(next.error ? { tone: 'bad', text: next.error } : null);
+      setLoading(false);
+    });
+    return () => {
+      active = false;
+    };
   }, []);
 
   const refresh = async () => {
-    setBusy(true);
-    setMessage('');
+    setNotice(null);
+    setLoading(true);
     try {
       const response = await api.applicationsRefresh();
-      if (response.code !== 0) setMessage(response.output || 'Dashboard refresh failed.');
+      if (response.code !== 0) {
+        setNotice({ tone: 'bad', text: response.output || 'Application refresh failed.' });
+      }
       await load();
     } finally {
-      setBusy(false);
+      setLoading(false);
     }
   };
 
-  const flagApplication = async (
-    item: ApplicationRecord,
-    flag: ApplicationOutcomeFlag,
-  ) => {
-    const label = flag === 'interview'
-      ? 'Interview'
-      : flag === 'denied'
-        ? 'Denied'
-        : "Didn't get job";
-    const confirmed = window.confirm(
-      `Change ${item.company} — ${item.title} to “${label}”? You can undo this change afterward.`,
-    );
-    if (!confirmed) return;
-
-    setUpdatingIdentity(item.identity_key);
-    setMessage('');
-    setMessageIsError(false);
+  const setOutcome = async (item: ApplicationRecord, flag: ApplicationOutcomeFlag) => {
+    const label = OUTCOMES.find((option) => option.value === flag)?.label || flag;
+    if (!window.confirm(`Set ${item.company}, ${item.title} to ${label}?`)) return;
+    setBusyIdentity(item.identity_key);
+    setNotice(null);
     try {
       const response = await api.applicationsFlag(item.identity_key, flag);
       if (response.code !== 0) {
-        setMessageIsError(true);
-        setMessage(response.output || 'Could not save the outcome.');
+        setNotice({ tone: 'bad', text: response.output || 'The outcome could not be saved.' });
         return;
       }
-      setLastChange({
-        identityKey: item.identity_key,
-        company: item.company,
-        title: item.title,
-      });
-      setMessage(`${item.company} was changed to ${label}.`);
+      setUndoIdentity(item.identity_key);
+      setNotice({ tone: 'good', text: `${item.company} is now marked ${label}.` });
       await load();
     } finally {
-      setUpdatingIdentity('');
+      setBusyIdentity('');
     }
   };
 
-  const undoLastChange = async () => {
-    if (!lastChange) return;
-    setUpdatingIdentity(lastChange.identityKey);
-    setMessage('');
-    setMessageIsError(false);
+  const undo = async () => {
+    if (!undoIdentity) return;
+    setBusyIdentity(undoIdentity);
     try {
-      const response = await api.applicationsUndo(lastChange.identityKey);
+      const response = await api.applicationsUndo(undoIdentity);
       if (response.code !== 0) {
-        setMessageIsError(true);
-        setMessage(response.output || 'Could not undo the outcome change.');
+        setNotice({ tone: 'bad', text: response.output || 'The last change could not be undone.' });
         return;
       }
-      setMessage(`Restored the previous status for ${lastChange.company}.`);
-      setLastChange(null);
+      setUndoIdentity('');
+      setNotice({ tone: 'good', text: 'The previous application state was restored.' });
       await load();
     } finally {
-      setUpdatingIdentity('');
+      setBusyIdentity('');
     }
   };
 
   const filtered = useMemo(() => {
-    const term = query.trim().toLowerCase();
+    const needle = query.trim().toLowerCase();
     return result.applications.filter((item) => {
-      const matchesStatus = !status || item.status === status;
-      const haystack = [
-        item.company, item.title, item.location, item.notes, item.source,
-      ].join(' ').toLowerCase();
-      return matchesStatus && (!term || haystack.includes(term));
+      const statusMatches = !status || item.status === status;
+      const text = [item.company, item.title, item.location, item.source, item.notes]
+        .join(' ')
+        .toLowerCase();
+      return statusMatches && (!needle || text.includes(needle));
     });
-  }, [result.applications, query, status]);
+  }, [query, result.applications, status]);
 
-  const summary = result.summary || EMPTY_SUMMARY;
-  const stats = [
-    ['Total', summary.total],
-    ['Active', summary.active],
-    ['Interviewing', summary.interviewing],
-    ['Offers / accepted', summary.offers],
-    ['Closed', summary.closed],
-    ['Companies', summary.companies],
+  const knownStatuses = useMemo(
+    () => [...new Set(result.applications.map((item) => item.status).filter(Boolean))].sort(),
+    [result.applications],
+  );
+  const summary = result.summary;
+  const measures = [
+    ['Tracked', summary.total ?? 0],
+    ['Active', summary.active ?? 0],
+    ['Interviewing', summary.interviewing ?? 0],
+    ['Offers', summary.offers ?? 0],
+    ['Closed', summary.closed ?? 0],
   ];
 
   return (
-    <div className="space-y-6">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-100">Applications</h1>
-          <p className="text-sm text-slate-400">
-            Durable applied-role history plus current lifecycle outcomes.
+    <section className="mx-auto max-w-[1500px] space-y-7">
+      <header className="flex flex-wrap items-end justify-between gap-4">
+        <div className="max-w-2xl">
+          <h1 className="text-3xl font-semibold tracking-[-0.03em] text-slate-50">Applications</h1>
+          <p className="mt-2 text-sm leading-6 text-slate-400">
+            One durable record of drafts, submitted roles, interviews, and closed outcomes.
           </p>
         </div>
         <div className="flex gap-2">
           <Button
             variant="outline"
-            className="border-slate-600 bg-slate-800 text-slate-100 hover:bg-slate-700"
-            onClick={() => void api.applicationsReportOpen()}
             disabled={!result.exists}
+            onClick={() => void api.applicationsReportOpen()}
+            className="border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800"
           >
-            <ExternalLink className="mr-2 h-4 w-4" />
-            Interactive report
+            <FileText className="mr-2 h-4 w-4" />
+            Open report
           </Button>
           <Button
-            onClick={refresh}
-            disabled={busy}
-            className="bg-cyan-500 text-slate-950 hover:bg-cyan-400"
+            disabled={loading}
+            onClick={() => void refresh()}
+            className="bg-cyan-400 text-slate-950 hover:bg-cyan-300"
           >
-            <RefreshCw className={'mr-2 h-4 w-4 ' + (busy ? 'animate-spin' : '')} />
-            Refresh
+            <RefreshCw className={`mr-2 h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+            Refresh data
           </Button>
         </div>
-      </div>
+      </header>
 
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
-        {stats.map(([label, value]) => (
-          <Card key={String(label)} className="border-slate-800 bg-slate-900/60">
-            <CardContent className="p-4">
-              <div className="text-2xl font-bold text-cyan-300">{value}</div>
-              <div className="text-xs text-slate-400">{label}</div>
-            </CardContent>
-          </Card>
+      <div className="grid grid-cols-2 border-y border-slate-800 md:grid-cols-5">
+        {measures.map(([label, value], index) => (
+          <div
+            key={label}
+            className={`px-4 py-5 ${index > 0 ? 'border-l border-slate-800' : ''}`}
+          >
+            <div className="font-mono text-2xl tabular-nums text-slate-100">{value}</div>
+            <div className="mt-1 text-xs font-medium uppercase tracking-[0.12em] text-slate-500">
+              {label}
+            </div>
+          </div>
         ))}
       </div>
 
-      {summary.status_not_recorded > 0 && (
-        <div className="rounded-lg border border-amber-700/50 bg-amber-950/30 p-3 text-sm text-amber-200">
-          {summary.status_not_recorded} legacy applications have no outcome recorded yet.
-          They remain labeled applied until their statuses are updated.
-        </div>
-      )}
-      {message && (
-        <div className={`flex flex-wrap items-center gap-3 rounded-lg border p-3 text-sm ${
-          messageIsError
-            ? 'border-rose-800/60 bg-rose-950/30 text-rose-300'
-            : 'border-emerald-800/60 bg-emerald-950/30 text-emerald-300'
-        }`}>
-          <span>{message}</span>
-          {!messageIsError && lastChange && (
+      {notice && (
+        <div
+          role={notice.tone === 'bad' ? 'alert' : 'status'}
+          className={`flex flex-wrap items-center gap-3 rounded-md border px-4 py-3 text-sm ${
+            notice.tone === 'bad'
+              ? 'border-rose-800 bg-rose-950/40 text-rose-200'
+              : 'border-emerald-800 bg-emerald-950/35 text-emerald-200'
+          }`}
+        >
+          <span>{notice.text}</span>
+          {notice.tone === 'good' && undoIdentity && (
             <Button
-              type="button"
               size="sm"
               variant="outline"
-              disabled={updatingIdentity === lastChange.identityKey}
-              onClick={() => void undoLastChange()}
-              className="border-emerald-700 bg-transparent text-emerald-200 hover:bg-emerald-900/50"
+              disabled={busyIdentity === undoIdentity}
+              onClick={() => void undo()}
+              className="border-emerald-700 bg-transparent text-emerald-100 hover:bg-emerald-900"
             >
-              <RotateCcw className="mr-2 h-4 w-4" />
-              Undo
+              <RotateCcw className="mr-2 h-3.5 w-3.5" />
+              Undo change
             </Button>
           )}
         </div>
       )}
 
-      <Card className="border-slate-800 bg-slate-900/60">
-        <CardHeader className="space-y-3">
-          <CardTitle className="text-slate-200">
-            {filtered.length} of {summary.total} applications
-          </CardTitle>
-          <div className="flex flex-wrap gap-2">
-            <div className="relative min-w-64 flex-1">
-              <Search className="absolute left-3 top-3 h-4 w-4 text-slate-500" />
-              <Input
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-                placeholder="Search company, role, location, or notes"
-                className="border-slate-700 bg-slate-950 pl-9 text-slate-100"
-              />
-            </div>
-            <select
-              value={status}
-              onChange={(event) => setStatus(event.target.value)}
-              className="rounded-md border border-slate-700 bg-slate-950 px-3 text-sm text-slate-200"
-            >
-              <option value="">All statuses</option>
-              {STATUS_ORDER.map((value) => (
-                <option key={value} value={value}>{value.replaceAll('_', ' ')}</option>
-              ))}
-            </select>
-          </div>
-        </CardHeader>
-        <CardContent>
-          <div className="overflow-auto">
-            <table className="w-full min-w-[950px] text-left text-sm">
-              <thead>
-                <tr className="border-b border-slate-800 text-xs uppercase text-slate-500">
-                  <th className="p-2">Company</th>
-                  <th className="p-2">Role</th>
-                  <th className="p-2">Status</th>
-                  <th className="p-2">Outcome</th>
-                  <th className="p-2">Applied</th>
-                  <th className="p-2">Location</th>
-                  <th className="p-2">Fit</th>
-                  <th className="p-2">Notes</th>
-                  <th className="p-2">Link</th>
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="relative min-w-64 flex-1">
+          <Search className="pointer-events-none absolute left-3 top-3 h-4 w-4 text-slate-500" />
+          <Input
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Search company, role, location, or note"
+            className="border-slate-700 bg-slate-900 pl-9 text-slate-100 placeholder:text-slate-500"
+          />
+        </div>
+        <select
+          aria-label="Filter by application status"
+          value={status}
+          onChange={(event) => setStatus(event.target.value)}
+          className="h-10 rounded-md border border-slate-700 bg-slate-900 px-3 text-sm text-slate-200 outline-none focus:ring-2 focus:ring-cyan-400"
+        >
+          <option value="">All statuses</option>
+          {knownStatuses.map((value) => (
+            <option key={value} value={value}>{value.replaceAll('_', ' ')}</option>
+          ))}
+        </select>
+      </div>
+
+      <div className="overflow-hidden rounded-md border border-slate-800 bg-slate-900/45">
+        <div className="overflow-auto">
+          <table className="w-full min-w-[980px] text-left text-sm">
+            <thead className="bg-slate-900 text-xs uppercase tracking-[0.1em] text-slate-500">
+              <tr>
+                <th className="px-4 py-3 font-medium">Company and role</th>
+                <th className="px-4 py-3 font-medium">Status</th>
+                <th className="px-4 py-3 font-medium">Outcome</th>
+                <th className="px-4 py-3 font-medium">Applied</th>
+                <th className="px-4 py-3 font-medium">Location</th>
+                <th className="px-4 py-3 font-medium">Fit</th>
+                <th className="px-4 py-3 font-medium">Source</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map((item) => (
+                <tr key={item.identity_key} className="border-t border-slate-800 text-slate-300">
+                  <td className="max-w-80 px-4 py-4">
+                    <div className="font-medium text-slate-100">{item.company}</div>
+                    <div className="mt-1 text-slate-400">{item.title}</div>
+                  </td>
+                  <td className="px-4 py-4">
+                    <span className="rounded-full bg-cyan-400/10 px-2.5 py-1 text-xs text-cyan-200">
+                      {item.status_inferred ? 'Applied, outcome not recorded' : item.status_label}
+                    </span>
+                  </td>
+                  <td className="px-4 py-4">
+                    <select
+                      aria-label={`Set outcome for ${item.company}, ${item.title}`}
+                      value={item.outcome_flag}
+                      disabled={busyIdentity === item.identity_key}
+                      onChange={(event) => {
+                        const flag = event.target.value as ApplicationOutcomeFlag;
+                        if (flag) void setOutcome(item, flag);
+                      }}
+                      className="h-9 min-w-36 rounded-md border border-slate-700 bg-slate-950 px-2 text-xs text-slate-200 outline-none focus:ring-2 focus:ring-cyan-400 disabled:opacity-50"
+                    >
+                      <option value="">Set outcome</option>
+                      {OUTCOMES.map((option) => (
+                        <option key={option.value} value={option.value}>{option.label}</option>
+                      ))}
+                    </select>
+                  </td>
+                  <td className="px-4 py-4 font-mono text-xs tabular-nums text-slate-400">
+                    {shortDate(item.applied_at)}
+                  </td>
+                  <td className="max-w-52 px-4 py-4 text-slate-400">{item.location || 'Not recorded'}</td>
+                  <td className="px-4 py-4 font-mono tabular-nums text-cyan-200">{item.fit_score}</td>
+                  <td className="max-w-40 truncate px-4 py-4 text-xs text-slate-500" title={item.source}>
+                    {item.source || 'Unknown'}
+                  </td>
                 </tr>
-              </thead>
-              <tbody>
-                {filtered.map((item: ApplicationRecord) => (
-                  <tr key={item.identity_key} className="border-b border-slate-800/50 text-slate-300">
-                    <td className="max-w-48 p-2">
-                      <strong className="block text-slate-200">{item.company}</strong>
-                      <span className="text-xs text-slate-500">{item.source}</span>
-                    </td>
-                    <td className="max-w-64 p-2">{item.title}</td>
-                    <td className="p-2">
-                      <span className="rounded-full bg-cyan-500/15 px-2 py-1 text-xs text-cyan-300">
-                        {item.status_inferred ? 'applied - status not recorded' : item.status_label}
-                      </span>
-                    </td>
-                    <td className="p-2">
-                      <select
-                        value={item.outcome_flag}
-                        disabled={updatingIdentity === item.identity_key}
-                        onChange={(event) => {
-                          const flag = event.target.value as ApplicationOutcomeFlag;
-                          if (flag) void flagApplication(item, flag);
-                        }}
-                        className="min-w-36 rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-slate-200"
-                        aria-label={`Flag outcome for ${item.company} ${item.title}`}
-                      >
-                        <option value="">Flag outcome...</option>
-                        <option value="interview">Interview</option>
-                        <option value="denied">Denied</option>
-                        <option value="not_selected">Didn't get job</option>
-                      </select>
-                    </td>
-                    <td className="p-2">{dateOnly(item.applied_at)}</td>
-                    <td className="max-w-48 p-2">{item.location || 'Not recorded'}</td>
-                    <td className="p-2 text-cyan-300">{item.fit_score}</td>
-                    <td className="max-w-52 truncate p-2" title={item.notes}>{item.notes}</td>
-                    <td className="p-2">
-                      {item.url && (
-                        <button
-                          className="text-cyan-400 hover:underline"
-                          onClick={() => void api.externalOpen(item.url)}
-                        >
-                          open
-                        </button>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-                {filtered.length === 0 && (
-                  <tr><td colSpan={9} className="p-8 text-center text-slate-500">
-                    No applications match these filters.
-                  </td></tr>
-                )}
-              </tbody>
-            </table>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {!loading && filtered.length === 0 && (
+          <div className="border-t border-slate-800 px-6 py-14 text-center">
+            <p className="font-medium text-slate-200">
+              {result.applications.length === 0 ? 'No applications recorded yet.' : 'No applications match these filters.'}
+            </p>
+            <p className="mt-2 text-sm text-slate-500">
+              {result.applications.length === 0
+                ? 'Approved application drafts and submitted roles will appear here.'
+                : 'Clear a filter or try a broader search.'}
+            </p>
           </div>
-        </CardContent>
-      </Card>
-    </div>
+        )}
+        {loading && (
+          <div className="border-t border-slate-800 px-6 py-14 text-center text-sm text-slate-400">
+            Loading application history...
+          </div>
+        )}
+      </div>
+    </section>
   );
 }

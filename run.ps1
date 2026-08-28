@@ -5,6 +5,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+$PreviousDontWriteBytecode = $env:PYTHONDONTWRITEBYTECODE
+$env:PYTHONDONTWRITEBYTECODE = '1'
 Push-Location $ProjectRoot
 try {
     $PythonCommand = $env:JOB_PIPELINE_PYTHON
@@ -30,4 +32,5 @@ try {
 }
 finally {
     Pop-Location
+    $env:PYTHONDONTWRITEBYTECODE = $PreviousDontWriteBytecode
 }

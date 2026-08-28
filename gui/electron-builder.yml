@@ -1,10 +1,10 @@
-# electron-builder configuration for the AI Job Search Pipeline desktop.
+# electron-builder configuration for Expedient Employment.
 # Driven by packaging/build-windows.ps1 (Windows) and packaging/build-posix.sh (macOS/Linux).
 # Paths are relative to this file's directory (the gui/ project directory).
 
-appId: com.albertdeluna.aijobsearch
-productName: AI Job Search Pipeline
-copyright: Copyright 2026 AI Job Search Pipeline contributors
+appId: com.expedient.employment
+productName: Expedient Employment
+copyright: Copyright © 2026 Expedient Employment contributors
 
 directories:
   output: release
@@ -25,8 +25,6 @@ extraResources:
       - "!**/__pycache__/**"
   - from: ../run.ps1
     to: pipeline/run.ps1
-  - from: ../pyproject.toml
-    to: pipeline/pyproject.toml
   - from: ../run.cmd
     to: pipeline/run.cmd
   - from: ../scripts
@@ -42,17 +40,33 @@ extraResources:
     to: pipeline/docs
     filter:
       - "**/*"
+      - "!superpowers/**"
   - from: ../README.md
     to: pipeline/README.md
   - from: ../LICENSE
     to: pipeline/LICENSE
   - from: ../THIRD_PARTY_NOTICES.md
     to: pipeline/THIRD_PARTY_NOTICES.md
+  - from: only-cli-runtime/node_modules
+    to: pipeline/only-cli-runtime/node_modules
+    filter:
+      - "**/*"
+      - "!**/.github/**"
+      - "!**/test/**"
+      - "!**/tests/**"
+      - "!**/__tests__/**"
+      - "!**/*.map"
+  - from: ../python-runtime
+    to: pipeline/python-runtime
+    filter:
+      - "tzdata/**"
+      - "tzdata-*.dist-info/**"
+      - "!**/__pycache__/**"
+      - "!**/*.pyc"
 
 # Windows: portable zip plus an unpacked dir that installer/windows.iss turns
 # into the Inno Setup installer. No NSIS target on purpose.
 win:
-  artifactName: AIJobSearchPipeline-${version}-${arch}.${ext}
   target:
     - zip
     - dir

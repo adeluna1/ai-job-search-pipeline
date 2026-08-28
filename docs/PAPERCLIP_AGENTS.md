@@ -73,13 +73,13 @@ Do not put demographic, disability, veteran, or other voluntary self-identificat
 ## Run the workflow
 
 1. In Paperclip, inspect AIJ-1 and resume Agent A only when the search objective is ready.
-2. Agent A runs `scripts/agent-run.cmd agent-a-find` with literal locations and a 24-hour, 3-day, or 7-day window. It excludes applied/sent roles, resolves employer URLs, verifies active pages, requires exact geography and a known in-window date, resume-ranks only the current run, and writes no more than 10 roles plus the complete audit.
-3. Resume Agent B after that shortlist exists and run it with `--live`. Agent B independently rechecks geography, lifecycle suppression, the exact hour window, the active page, and direct ATS/employer-domain evidence. Only an unambiguously fresh `apply` decision creates a SHA-256-bound record under `agent_c_handoffs`; posting intelligence never changes the resume-fit score.
-4. Resume Agent C only when that current handoff exists. Agent C validates the handoff, consumes the persisted Agent B analysis without recomputing it, and writes an ignored evidence-bound packet under `data/application_packets/`. An incomplete profile produces `needs_information` and leaves the lifecycle `saved`; only a complete packet becomes `ready_to_apply`.
-5. If the packet is complete, Agent C runs `agent-c-browser` without `--execute` to create a dry-run plan and a pending receipt under `data/application_approvals/`. The browser boundary independently blocks `fill_and_submit` while any unresolved question exists.
+2. Agent A runs `scripts/agent-run.cmd agent-a-find`. The command attempts each JobSpy board once, opens a run-scoped circuit breaker for HTTP 400/403, routes missing coverage through WebClaw, optionally uses the authenticated read-only Agent Web Browser bridge when a discovered Glassdoor/ZipRecruiter page rejects direct reading, resolves employer application URLs, and writes the complete audit to `agent_a_discovery.json`.
+3. Only WebClaw-verified active employer postings cross the scoring gate. Resume Agent B after that shortlist exists; Agent B records `apply`, `review`, or `skip` and may add Resume-Matcher only when the issue explicitly authorizes the target service URL and resume upload.
+4. Resume Agent C only for an `apply` decision and only after the private profile is complete. Agent C runs `agent-c` to write an ignored packet under `data/application_packets/`.
+5. Agent C runs `agent-c-browser` without `--execute` to create a dry-run plan and a pending receipt under `data/application_approvals/`.
 6. Agent C requests a per-role confirmation naming the company, title, URL, packet SHA-256, unresolved questions, and whether authority is `fill_only` or `fill_and_submit`.
 7. Pending, rejected, expired, mismatched, or ambiguous confirmation means stop. After acceptance, Agent C records the reviewer and timestamp in the ignored receipt; authority applies only to that packet hash and action.
-8. The approved execution uses browser-use with an exact-domain allowlist and moves the job to `applying`. That transition immediately updates alias-aware discovery suppression. Mark it `applied` only after a human verifies the employer success receipt; otherwise retain the result and blocker without claiming submission.
+8. The approved execution uses browser-use with an exact-domain allowlist. Mark a job `applied` only after the employer page shows a success receipt; otherwise preserve a handoff and keep it `saved`.
 
 For a safe offline contract test that never opens a site or submits anything:
 
@@ -93,16 +93,16 @@ Expected final state: Agent A identifies the aligned fixture, Agent B recommends
 
 | Command | Reads | Writes | Network/external effect |
 |---|---|---|---|
-| `agent-a-find` | exact locations/window, corrected resume, exclusions | current-run top 10 or fewer, report, discovery audit, findings | Board discovery; WebClaw/AWB fallback; active-page verification |
-| `agent-a` | at most 10 current-run IDs, locations, matches | `data/agent_a_findings.json` | None |
-| `agent-b --live --job-id JOB_ID` | at most 10 jobs, exact scope, Agent A finding | reviews plus integrity-bound Agent C handoffs | Live employer read; Resume-Matcher additionally requires explicit upload consent |
-| `agent-c JOB_ID` | exact unexpired Agent B handoff, private profile, corrected resume path | evidence-bound packet; `ready_to_apply` only when complete, otherwise `needs_information` and `saved` | Never submits |
-| `agent-c-browser JOB_ID` | complete private packet | pending receipt and dry-run plan | None unless `--execute`; `--submit` independently rejects unresolved questions and requires exact `fill_and_submit` approval |
+| `agent-a-find` | corrected resume, search objective | verified jobs, scores, report, `agent_a_discovery.json`, `agent_a_findings.json` | One JobSpy attempt per board; WebClaw search, optional AWB visible-text recovery, employer resolution, and active-page verification |
+| `agent-a` | stored jobs, matches | `data/agent_a_findings.json` | None |
+| `agent-b --job-id JOB_ID` | stored job, match, Agent A finding | `data/agent_b_reviews.json` | None unless `--live`; Resume-Matcher additionally requires explicit upload consent |
+| `agent-c JOB_ID` | Agent B review, private profile, corrected resume path | `data/application_packets/JOB_ID.json` | Never submits |
+| `agent-c-browser JOB_ID` | private packet | pending receipt and dry-run plan | None unless `--execute`; `--submit` also requires exact `fill_and_submit` approval |
 | `agent-demo` | fixture jobs, corrected resume | demo database, private fixture packet, `reports/agent_demo.json` | None |
 
 ## Failure and safety behavior
 
-- Missing date or date-only evidence crossing the requested hour boundary: exclude it before an Agent B-to-C handoff.
+- Missing or unparseable posting date: Agent A flags it; Agent B returns `review` unless freshness can be verified.
 - Invalid or expired live page: Agent B returns `skip`.
 - Stored and live title/company differ: Agent B records a discrepancy.
 - Match score below threshold: Agent B returns `skip` even if Agent A surfaced it.
@@ -134,7 +134,7 @@ Expected final state: Agent A identifies the aligned fixture, Agent B recommends
 | `scripts/test-paperclip.ps1` | Verifies all roles are present, paused, sandboxed, and assigned; `-ProbeCodex` adds a minimal authenticated adapter probe |
 | `scripts/install-agent-integrations.ps1` | Creates independent pinned JobSpy and browser-use runtimes to avoid dependency conflicts |
 | `scripts/install-agent-web-browser.ps1` | Clones the reviewed AWB commit, applies the narrow first-party job-board patch, and optionally tests/builds it |
-| `scripts/agent-run.ps1` / `.cmd` | Repairs quoted `OR` queries split by legacy Windows forwarding, selects the JobSpy or browser-use runtime, and handles locked-down PowerShell policy |
+| `scripts/agent-run.ps1` / `.cmd` | Selects the JobSpy or browser-use runtime from the specialist command; the CMD wrapper handles locked-down PowerShell policy |
 | `scripts/paperclip.ps1` | Pass-through CLI wrapper for the isolated Paperclip instance |
 | `scripts/_paperclip-common.ps1` | Shared paths, environment, health check, and CLI invocation |
 

@@ -1,65 +1,94 @@
-# Packaging AI Job Search Pipeline
+# Packaging Expedient Employment
 
-This directory builds the selectively integrated Electron desktop interface and
-Windows release artifacts. The package includes this repository''s Python source,
-scripts, configuration templates, and documentation. It does not bundle Python,
-JobSpy, Paperclip, Docker, Resume-Matcher, browser-use, WebClaw, or Agent Web
-Browser runtimes.
+This directory contains the release build scripts. The packaging produces a
+desktop app that bundles the entire job-hunting pipeline (Python package,
+CLI entrypoints, scripts, config templates, and docs) inside the Electron
+application's resources under `pipeline/`, so end users do not need a separate
+source checkout.
 
-## Runtime requirements
+## Artifacts
 
-- Windows 10 or later.
-- Python 3.10+ available on PATH for pipeline commands.
-- Internet access for live discovery and verification.
-- Node.js 20+ only when Paperclip is used.
-- Docker Desktop only when Resume-Matcher is used.
-- Optional integrations must be installed with the repository scripts.
+All artifacts land in `release/` at the repository root:
 
-The installed application copies the bundled pipeline to its per-user Electron
-data directory on first run. Runtime data, reports, and local configuration stay
-writable there. Existing user configuration is preserved during upgrades.
+| Artifact | Platform | Produced by |
+|---|---|---|
+| `ExpedientEmployment-Setup-<version>.exe` | Windows | Inno Setup (per-user installer, no admin required) |
+| `ExpedientEmployment-portable-<version>.zip` | Windows | electron-builder `zip` target |
+| `Expedient Employment-<version>.dmg` / `.zip` | macOS | electron-builder `mac` targets |
+| `Expedient Employment-<version>.AppImage` | Linux | electron-builder `linux` target |
 
-## Build artifacts
+The version is read from `gui/package.json` — bump it there before a release.
 
-All final artifacts land in the repository release directory:
+## Windows release
 
-| Artifact | Platform |
-|---|---|
-| AIJobSearchPipeline-Setup-<version>.exe | Windows per-user installer |
-| AIJobSearchPipeline-portable-<version>.zip | Windows portable package |
-| AI Job Search Pipeline-<version>.dmg or .zip | macOS |
-| AI Job Search Pipeline-<version>.AppImage | Linux |
+One-time prerequisite: **Inno Setup 6** from <https://jrsoftware.org/isinfo.php>
+(the script checks `C:\Program Files (x86)\Inno Setup 6\ISCC.exe`,
+`C:\Program Files\Inno Setup 6\ISCC.exe`, then PATH).
 
-The version comes from gui/package.json.
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\build-windows.ps1
+```
 
-## Windows build
+After a successful dependency install and GUI build, packaging-only retries can
+use `-SkipOnlyCliInstall -SkipPythonRuntimeInstall -SkipGuiBuild`. The script
+refuses either runtime skip when its required files are missing, and refuses the
+GUI skip when the production entry file is missing.
 
-Install Node.js and Inno Setup 6, then run:
+The script will:
 
-    powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\build-windows.ps1
+1. Install the pinned only-cli runtime and `tzdata==2026.3`, then run
+   `npm run build` in `gui/` (installing GUI dependencies first if needed).
+2. Run `npx --yes electron-builder --config electron-builder.yml --win dir zip`
+   from `gui/`. Temporary Electron extraction is placed under the operating
+   system temporary directory so source-tree watchers cannot lock its rename.
+3. Copy the portable zip to `release/ExpedientEmployment-portable-<version>.zip`.
+4. Locate ISCC.exe through default paths, PATH, or the Inno Setup uninstall
+   registry entries, then compile `installer/windows.iss` into
+   `release/ExpedientEmployment-Setup-<version>.exe`.
 
-The script installs GUI dependencies if needed, runs tests and the production
-build, creates the Electron unpacked directory and zip, then compiles the Inno
-Setup installer. If Inno Setup is absent, the Electron zip may already exist but
-the installer step stops with an actionable error.
+The installer is per-user: it installs to
+`%LOCALAPPDATA%\Programs\Expedient Employment`, adds a Start Menu shortcut,
+offers an optional desktop shortcut, and registers an uninstaller. No
+administrator rights are required.
 
-## Package contents
+If Inno Setup is missing, the script stops with a friendly message — the
+portable zip is still produced and usable on its own.
 
-electron-builder copies these project assets into resources/pipeline:
+## macOS / Linux release
 
-- job_pipeline and command entry points
-- scripts and non-private JSON configuration templates
-- pyproject.toml
-- docs, README, license, and third-party notices
+```bash
+./packaging/build-posix.sh          # auto-detects the host platform
+./packaging/build-posix.sh mac      # dmg + zip   (must run on macOS)
+./packaging/build-posix.sh linux    # AppImage    (must run on Linux)
+```
 
-It intentionally excludes .env files, local configuration, resumes, job data,
-reports, logs, dependency runtimes, browser profiles, and API keys.
+> **Note:** macOS installers can only be built on macOS, and Linux AppImages on
+> Linux. Cross-building is not supported by this setup. These targets are
+> defined but not yet smoke-tested — see ISSUES.md (EE-5).
 
-## Release checklist
+## What goes into the package
 
-1. Update the version in gui/package.json.
-2. Run npm.cmd test, npm.cmd run lint, and npm.cmd run build in gui.
-3. Run the Python test suite from the repository root.
-4. Run packaging/build-windows.ps1.
-5. Smoke-test search, report opening, and embedded login on a clean Windows user.
-6. Publish checksums with the GitHub Release.
+`gui/electron-builder.yml` declares `extraResources` that copy the following
+into `resources/pipeline/` inside the packaged app:
+
+- `job_pipeline/` (without `__pycache__`)
+- `python-runtime/tzdata` (the pinned IANA timezone fallback, staged at the repository root)
+- `run.ps1`, `run.cmd`, `scripts/`
+- `config/*.json` (excluding `*.local.json` — user-private config never ships)
+- `docs/`, `README.md`, `LICENSE`, `THIRD_PARTY_NOTICES.md`
+- the Git-pinned only-cli production runtime, installed with optional dependencies omitted
+
+Runtime data (`data/`, `reports/`, `logs/`) is never packaged; it is created at
+run time. Version 2.0.0 completed the installed-layout service, tool, shortcut,
+and scheduler verification tracked as ISSUES.md EE-9.
+
+## Suggested release checklist
+
+1. Bump `version` in `gui/package.json`.
+2. Run `python -m unittest discover -s tests`.
+3. Run the renderer tests, lint, build, and Electron boundary tests.
+4. Run dependency, static-analysis, tracked-source privacy, and package-payload privacy gates.
+5. Run `packaging/build-windows.ps1` and platform-native POSIX builders where applicable.
+6. Install the result, run one installed only-cli workflow, verify the scheduled wake, and check the Start Menu shortcut.
+7. Sign and timestamp the Windows artifacts when a trusted signing certificate is available.
+8. Create a release and attach the verified artifacts.

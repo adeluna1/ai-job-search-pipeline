@@ -158,7 +158,7 @@ def content_fingerprint(text: str) -> str:
     weights = [0] * 64
     for index in range(len(tokens) - 2):
         shingle = " ".join(tokens[index : index + 3])
-        digest = hashlib.sha1(shingle.encode("utf-8")).digest()[:8]
+        digest = hashlib.sha256(shingle.encode("utf-8")).digest()[:8]
         value = int.from_bytes(digest, "big")
         for bit in range(64):
             weights[bit] += 1 if value & (1 << (63 - bit)) else -1

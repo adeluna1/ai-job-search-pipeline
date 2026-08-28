@@ -1,53 +1,73 @@
-# AI Job Search Pipeline Desktop
+# React + TypeScript + Vite
 
-This React, TypeScript, and Electron interface is selectively adapted from
-BarnsL/expedient-employment v1.4.0. It controls the maintained Agent A/B/C
-pipeline in the parent directory; it does not replace the Python search,
-verification, lifecycle, scoring, or approval logic.
+This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
 
-## Development
+Currently, two official plugins are available:
 
-From this directory:
+- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
+- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
 
-    npm.cmd install
-    npm.cmd test
-    npm.cmd run lint
-    npm.cmd run build
-    npm.cmd run electron
+## React Compiler
 
-Use npm.cmd run dev for the Vite renderer alone. For an Electron development
-window backed by Vite, start Vite on port 7100 and run npm.cmd run electron:dev.
+The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
 
-## Search behavior
+## Expanding the ESLint configuration
 
-The Search page invokes agent-a-find with:
+If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
 
-- the reviewed junior recruiting and recruiting-coordination title family;
-- San Francisco Bay Area, San Francisco, San Jose, Oakland, and Sacramento;
-- exact 24-hour, 3-day, or 7-day freshness;
-- a hard top-10 output cap;
-- the selected corrected DOCX resume.
+```js
+export default defineConfig([
+  globalIgnores(['dist']),
+  {
+    files: ['**/*.{ts,tsx}'],
+    extends: [
+      // Other configs...
 
-The Python pipeline remains responsible for applied-role exclusions, duplicate
-removal, live employer-page verification, posting intelligence, Agent B scoring,
-and the approval-bound Agent B to Agent C handoff.
+      // Remove tseslint.configs.recommended and replace with this
+      tseslint.configs.recommendedTypeChecked,
+      // Alternatively, use this for stricter rules
+      tseslint.configs.strictTypeChecked,
+      // Optionally, add this for stylistic rules
+      tseslint.configs.stylisticTypeChecked,
 
-## Security boundaries
+      // Other configs...
+    ],
+    languageOptions: {
+      parserOptions: {
+        project: ['./tsconfig.node.json', './tsconfig.app.json'],
+        tsconfigRootDir: import.meta.dirname,
+      },
+      // other options...
+    },
+  },
+])
+```
 
-- Renderer Node integration is disabled; context isolation and sandboxing are on.
-- IPC exposes a narrow allowlist rather than arbitrary command execution.
-- Search input, resume type, result count, freshness, and concurrency are bounded.
-- Embedded sessions allow reviewed job-board and identity-provider hosts only.
-- Browser permissions are denied by default.
-- External links must use HTTPS.
-- Application submission is not exposed as an automatic desktop action.
+You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
 
-See ../docs/DESKTOP_APP.md for the operating and packaging reference.
+```js
+// eslint.config.js
+import reactX from 'eslint-plugin-react-x'
+import reactDom from 'eslint-plugin-react-dom'
 
-## Applications dashboard
-
-The Applications navigation item reads `reports/applications_dashboard.json`. Its Refresh button runs the offline `applications-report` CLI command, and Interactive report opens the self-contained HTML view. Applied-role data remains under the ignored `data/` and `reports/` directories.
-
-### Flagging outcomes
-
-Use the Outcome dropdown on an application row to select Interview, Denied, or Didn't get job. Confirm the change in the prompt; after it saves, the success banner offers Undo. Status changes and reversals update SQLite plus the durable registry as one rollback-safe operation. Distinct outcome flags are retained even when two choices share the rejected lifecycle state.
+export default defineConfig([
+  globalIgnores(['dist']),
+  {
+    files: ['**/*.{ts,tsx}'],
+    extends: [
+      // Other configs...
+      // Enable lint rules for React
+      reactX.configs['recommended-typescript'],
+      // Enable lint rules for React DOM
+      reactDom.configs.recommended,
+    ],
+    languageOptions: {
+      parserOptions: {
+        project: ['./tsconfig.node.json', './tsconfig.app.json'],
+        tsconfigRootDir: import.meta.dirname,
+      },
+      // other options...
+    },
+  },
+])
+```

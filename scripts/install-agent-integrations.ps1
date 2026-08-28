@@ -60,7 +60,7 @@ if ($BrowserUse -or $All) {
     }
     Install-AgentRuntime `
         -RuntimeName 'browser-use-runtime' `
-        -Package 'browser-use[core]==0.13.6' `
+        -Package 'browser-use[core]==0.13.8' `
         -ImportCode 'from browser_use import Agent, BrowserProfile' `
         -DisplayName 'browser-use'
 }

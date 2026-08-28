@@ -1,0 +1,135 @@
+{
+  "candidate": {
+    "name": "Alex Rivera",
+    "location": "San Jose, CA",
+    "summary": "Recruiting operations and candidate-experience professional with high-volume technical recruiting coordination, global onboarding, ATS ownership, cross-functional program delivery, and project/operations experience across Meta, Intrinsic, Verily, LinkedIn, Google, and growth-stage teams.",
+    "years_experience": 10,
+    "target_roles": [
+      "Recruiting Coordinator",
+      "Senior Recruiting Coordinator",
+      "Recruiting Operations Coordinator",
+      "Talent Operations Coordinator",
+      "Candidate Experience Coordinator",
+      "Recruiting Program Coordinator",
+      "Onboarding Coordinator",
+      "People Operations Coordinator",
+      "Talent Acquisition Coordinator",
+      "Project Coordinator",
+      "Operations Coordinator"
+    ],
+    "preferred_locations": [
+      "Remote",
+      "San Jose",
+      "Santa Clara",
+      "Sunnyvale",
+      "Mountain View",
+      "Palo Alto",
+      "Menlo Park",
+      "San Francisco",
+      "South San Francisco",
+      "Bay Area",
+      "Silicon Valley"
+    ],
+    "accepted_work_modes": ["remote", "hybrid", "onsite"],
+    "skills": [
+      "recruiting coordination",
+      "recruiting operations",
+      "technical recruiting",
+      "candidate experience",
+      "interview scheduling",
+      "high-volume scheduling",
+      "Greenhouse ATS",
+      "Ashby ATS",
+      "applicant tracking systems",
+      "job requisition intake",
+      "job postings",
+      "onboarding",
+      "global onboarding",
+      "candidate communication",
+      "hiring manager partnership",
+      "cross-functional collaboration",
+      "stakeholder management",
+      "offer letters",
+      "background checks",
+      "training documentation",
+      "knowledge management",
+      "AI and LLM tools",
+      "data analysis and reporting",
+      "database management",
+      "project management",
+      "operations management",
+      "G Suite",
+      "Microsoft Excel",
+      "client relations",
+      "sales operations"
+    ],
+    "responsibility_keywords": [
+      "schedule interviews",
+      "coordinate interviews",
+      "candidate communication",
+      "candidate experience",
+      "manage requisitions",
+      "maintain ATS data",
+      "partner with recruiters",
+      "partner with hiring managers",
+      "onboard new hires",
+      "prepare offer letters",
+      "coordinate background checks",
+      "build documentation",
+      "improve recruiting processes",
+      "support global teams",
+      "reporting and analytics"
+    ],
+    "evidence": [
+      {
+        "skill": "high-volume interview scheduling",
+        "evidence": "Organized more than 100 virtual interviews weekly at Verily using Greenhouse and G Suite."
+      },
+      {
+        "skill": "recruiting operations",
+        "evidence": "Managed requisition intake, job publishing, candidate communication, and ATS accuracy across multiple technology organizations."
+      },
+      {
+        "skill": "global onboarding",
+        "evidence": "Coordinated pre-start and Day One communications across teams in Munich, Singapore, and Mountain View."
+      },
+      {
+        "skill": "candidate experience",
+        "evidence": "Served as an onsite recruiting concierge and coordinated campus navigation and interview transitions at Meta."
+      },
+      {
+        "skill": "process improvement",
+        "evidence": "Built an AI-driven recruiting knowledge hub and redesigned team databases, panel frameworks, dashboards, and guides."
+      },
+      {
+        "skill": "stakeholder management",
+        "evidence": "Partnered with recruiters, hiring managers, engineering, HR, sales, marketing, finance, and global operations teams."
+      }
+    ],
+    "exclude_title_terms": [
+      "vice president",
+      "chief people officer",
+      "head of talent",
+      "director of recruiting",
+      "software engineer",
+      "recruiter - commission",
+      "physician recruiter"
+    ]
+  },
+  "scoring": {
+    "strong_fit_threshold": 72,
+    "weights": {
+      "title": 0.35,
+      "skills": 0.3,
+      "experience": 0.15,
+      "location": 0.1,
+      "responsibilities": 0.1
+    },
+    "ai_blend_weight": 0.3
+  },
+  "source": {
+    "resume_file_name": "Alex Rivera Resume.docx",
+    "profile_generated_on": "2026-07-20",
+    "contact_details_included": false
+  }
+}

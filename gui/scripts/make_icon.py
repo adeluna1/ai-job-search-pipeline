@@ -1,4 +1,4 @@
-"""Generate the AI Job Search Pipeline app icon.
+"""Generate the Expedient Employment app icon.
 
 Dark navy rounded-square background, cyan "EE" monogram with a magnifying
 glass glyph drawn over it (magnifier lens frames the monogram).

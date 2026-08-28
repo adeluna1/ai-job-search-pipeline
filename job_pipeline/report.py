@@ -56,7 +56,7 @@ def _card(record: dict[str, Any]) -> str:
         intelligence_line = (
             f'<p class="intelligence"><strong>Posting confidence: '
             f'{_e(str(trust.get("level", "unknown")).title())} '
-            f'({_e(trust.get("score", ""))}/100)</strong> — {_e(signal_text)} '
+            f'({_e(trust.get("score", ""))}/100)</strong>: {_e(signal_text)} '
             f'<span>Advisory only; resume score unchanged.</span></p>'
         )
     return f"""
@@ -92,7 +92,7 @@ def _manual_card(record: dict[str, Any]) -> str:
       <p class="eyebrow">Manual verification required</p>
       <h2><a href="{_e(record.get('source_url'))}">{_e(record.get('title'))} &mdash; {_e(record.get('company'))}</a></h2>
       <div class="meta-row"><span class="meta">{_e(record.get('location'))}</span><span class="meta">{_e(record.get('posting_date_evidence') or 'date unconfirmed')}</span></div>
-      <p><strong>{_e(record.get('failure_category'))}</strong> — {_e(record.get('reason'))}</p>
+      <p><strong>{_e(record.get('failure_category'))}</strong>: {_e(record.get('reason'))}</p>
       <p>{_e(record.get('recommended_manual_check'))}</p>
       <footer><span>{employer}</span><span>Preliminary score: {_e(record.get('preliminary_resume_fit_score') if record.get('preliminary_resume_fit_score') is not None else 'not scored')}</span><span>Not eligible for Agent B or C</span></footer>
     </article>

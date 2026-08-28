@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from .util import redact_secrets
+from .web_intelligence import SafeUrlPolicy, UnsafeUrlError
 
 
 LOGGER = logging.getLogger(__name__)
@@ -25,7 +26,13 @@ class WebClawError(RuntimeError):
 
 class WebClawClient:
     """Invoke WebClaw and validate its machine-readable JSON boundaries."""
-    def __init__(self, project_root: Path, binary: str | None = None, timeout: int = 60):
+    def __init__(
+        self,
+        project_root: Path,
+        binary: str | None = None,
+        timeout: int = 60,
+        url_policy: SafeUrlPolicy | None = None,
+    ):
         """Resolve the executable once and retain a default request timeout."""
         self.project_root = project_root
         try:
@@ -34,6 +41,16 @@ class WebClawClient:
             pass
         self.timeout = max(5, min(timeout, 120))
         self.binary = self._resolve_binary(binary)
+        self.url_policy = url_policy or SafeUrlPolicy()
+
+    def _validate_page_url(self, url: str) -> None:
+        """Reject local and non-public page targets before network access."""
+        try:
+            self.url_policy.resolve(url)
+        except (UnsafeUrlError, OSError) as exc:
+            raise WebClawError(
+                "Page URL must resolve only to public addresses."
+            ) from exc
 
     def _resolve_binary(self, explicit: str | None) -> str:
         """Find WebClaw from an explicit flag, environment, local tools, or PATH."""
@@ -126,6 +143,7 @@ class WebClawClient:
 
     def scrape(self, url: str) -> dict[str, Any]:
         """Extract one public page into WebClaw's JSON metadata/content structure."""
+        self._validate_page_url(url)
         tavily_key = os.environ.get("TAVILY_API_KEY", "").strip()
         if tavily_key:
             request = urllib.request.Request(
@@ -141,7 +159,9 @@ class WebClawClient:
                 raise WebClawError(f"Tavily extraction failed for {url}: {exc}") from exc
             results = payload.get("results", []) if isinstance(payload, dict) else []
             item = results[0] if results and isinstance(results[0], dict) else {}
-            return {"url": item.get("url", url), "content": item.get("raw_content", item.get("content", "")), "title": item.get("title", "")}
+            extracted = str(item.get("raw_content") or item.get("content") or "")
+            title = str(item.get("title") or "")
+            return {"url": item.get("url", url), "metadata": {"title": title}, "content": {"plain_text": extracted, "markdown": extracted}, "structured_data": []}
         output = self._run(
             [url, "--format", "json", "--only-main-content", "--timeout", str(self.timeout)],
             timeout=self.timeout + 15,
@@ -161,6 +181,7 @@ class WebClawClient:
         the employer closes the requisition. This lightweight second channel makes
         redirect-to-index and explicit expiry responses visible to the verifier.
         """
+        self._validate_page_url(url)
         request = urllib.request.Request(
             url,
             headers={

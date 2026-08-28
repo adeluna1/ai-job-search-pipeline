@@ -21,12 +21,8 @@ export default defineConfig([
     },
   },
   {
-    // These files are vendored shadcn primitives. Application code is still
-    // checked with the full React Hooks and Fast Refresh rule sets above.
     files: ['src/components/ui/**/*.{ts,tsx}'],
     rules: {
-      'react-hooks/purity': 'off',
-      'react-hooks/set-state-in-effect': 'off',
       'react-refresh/only-export-components': 'off',
     },
   },

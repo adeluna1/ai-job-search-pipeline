@@ -84,6 +84,23 @@ CREATE TABLE IF NOT EXISTS runs (
     jobs_saved INTEGER NOT NULL DEFAULT 0,
     errors INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS tool_invocations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    request_id TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    tool_name TEXT NOT NULL,
+    policy TEXT NOT NULL,
+    status TEXT NOT NULL,
+    arguments_digest TEXT NOT NULL,
+    result_digest TEXT NOT NULL DEFAULT '',
+    summary TEXT NOT NULL DEFAULT '',
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_tool_invocations_request
+ON tool_invocations(request_id, id);
 """
 
 
@@ -420,3 +437,53 @@ class JobStore:
             self.upsert_job(job)
             count += 1
         return count
+
+    def record_tool_invocation(
+        self,
+        *,
+        request_id: str,
+        actor: str,
+        tool_name: str,
+        policy: str,
+        status: str,
+        arguments_digest: str,
+        result_digest: str = "",
+        summary: str = "",
+        duration_ms: int = 0,
+    ) -> int:
+        """Persist metadata for one tool call without storing arguments or page bodies."""
+        cursor = self.connection.execute(
+            """
+            INSERT INTO tool_invocations(
+                request_id, actor, tool_name, policy, status, arguments_digest,
+                result_digest, summary, duration_ms, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                request_id,
+                actor,
+                tool_name,
+                policy,
+                status,
+                arguments_digest,
+                result_digest,
+                summary[:500],
+                max(0, int(duration_ms)),
+                utc_now(),
+            ),
+        )
+        self.connection.commit()
+        return int(cursor.lastrowid)
+
+    def tool_invocations(self, request_id: str | None = None) -> list[dict[str, Any]]:
+        """Return bounded tool audit metadata in execution order."""
+        if request_id is None:
+            rows = self.connection.execute(
+                "SELECT * FROM tool_invocations ORDER BY id"
+            ).fetchall()
+        else:
+            rows = self.connection.execute(
+                "SELECT * FROM tool_invocations WHERE request_id=? ORDER BY id",
+                (request_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]

@@ -104,8 +104,6 @@ export default function Settings() {
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
         <JsonEditor name="profile.json" title="config/profile.json" />
         <JsonEditor name="searches.json" title="config/searches.json" />
-        <JsonEditor name="access_policy.json" title="config/access_policy.json" />
-        <JsonEditor name="agent_web_browser.json" title="config/agent_web_browser.json" />
       </div>
 
       <Card className="border-slate-800 bg-slate-900/60">

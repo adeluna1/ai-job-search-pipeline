@@ -8,11 +8,13 @@ data/
 reports/
 logs/
 tools/
-.code-review-graph/
 *.tmp
+config/*.local.json
 .idea/
 .vscode/
 dist/
-build/
-*.egg-info/
+/build/
 release/
+/python-runtime/
+*.egg-info/
+.worktrees/

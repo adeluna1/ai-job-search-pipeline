@@ -15,6 +15,7 @@ import threading
 from datetime import date, datetime
 from typing import Any, Callable, Protocol
 
+from ..access_policy import access_guard_config, load_policy
 from ..jobs import Job, infer_required_years, infer_work_mode
 from ..util import canonical_url, normalize_space, stable_id, utc_now
 
@@ -46,11 +47,25 @@ def _board_logger_name(site: str) -> str:
     return f"JobSpy:{names.get(site, site)}"
 
 
-def _http_block_status(messages: list[str]) -> int | None:
-    """Return a non-retryable HTTP 400/403 code found in captured board logs."""
+def _http_block_status(
+    messages: list[str],
+    detect_status: list[int],
+    human_check_markers: list[str],
+) -> str | None:
+    """Classify a configured HTTP block or human-verification interstitial."""
     text = " ".join(messages)
-    match = re.search(r"(?:status\s+code|response|http)\D{0,12}(400|403)\b", text, re.IGNORECASE)
-    return int(match.group(1)) if match else None
+    lowered = text.casefold()
+    if any(marker.casefold() in lowered for marker in human_check_markers):
+        return "blocked_human_check"
+    codes = "|".join(re.escape(str(code)) for code in detect_status)
+    if not codes:
+        return None
+    match = re.search(
+        rf"(?:status\s+code|response|http)\D{{0,12}}({codes})\b",
+        text,
+        re.IGNORECASE,
+    )
+    return f"blocked_{match.group(1)}" if match else None
 
 
 class DiscoveryProvider(Protocol):
@@ -205,6 +220,10 @@ class JobSpySource:
         self._scraper = scraper
         self.board_timeout_seconds = max(0.1, float(board_timeout_seconds))
         self.last_diagnostics: dict[str, Any] = {}
+        policy = load_policy()
+        self._guard_statuses, self._guard_markers, self._guard_action = (
+            access_guard_config(policy)
+        )
 
     def _scrape_with_timeout(
         self, scraper: Callable[..., Any], options: dict[str, Any]
@@ -321,9 +340,13 @@ class JobSpySource:
                 board_status[call_site] = "error"
                 continue
             rows.extend(call_rows)
-            blocked_code = _http_block_status(capture.messages)
-            if blocked_code:
-                board_status[call_site] = f"blocked_{blocked_code}"
+            blocked_status = _http_block_status(
+                capture.messages,
+                self._guard_statuses,
+                self._guard_markers,
+            )
+            if blocked_status:
+                board_status[call_site] = blocked_status
             elif call_rows:
                 board_status[call_site] = "ok"
             else:
@@ -352,7 +375,7 @@ class JobSpySource:
         blocked_sites = [
             site
             for site, status in board_status.items()
-            if status in {"blocked_400", "blocked_403", "timed_out"}
+            if status.startswith("blocked_") or status == "timed_out"
         ]
         self.last_diagnostics = {
             "provider": self.name,
@@ -374,10 +397,18 @@ class JobSpySource:
             "sites_with_results": sites_with_results,
             "sites_without_results": sites_without_results,
             "blocked_sites": blocked_sites,
+            "access_guard": {
+                "detect_status": self._guard_statuses,
+                "human_check_markers": self._guard_markers,
+                "action": self._guard_action,
+                "policy": "detect, classify, and route to the user's session browser; "
+                "circumventing site access controls is out of scope",
+            },
             "circuit_breakers": {
                 site: {
                     "open": site in blocked_sites,
                     "reason": board_status[site] if site in blocked_sites else "",
+                    "action": self._guard_action if site in blocked_sites else "",
                     "retry_in_current_run": False if site in blocked_sites else None,
                 }
                 for site in selected
@@ -390,9 +421,10 @@ class JobSpySource:
             "fallback_sites": sites_without_results,
             "fallback_recommended": bool(sites_without_results),
             "note": (
-                "Every board call has a hard wall-clock timeout. HTTP 400/403 and timeouts open "
-                "that board's circuit breaker for the current run. Empty, blocked, timed-out, "
-                "and errored boards are eligible for WebClaw fallback."
+                "Every board call has a hard wall-clock timeout. Configured access-control "
+                "responses and human-verification markers open that board's circuit breaker "
+                "for the current run and route it to the user's session browser. Empty, "
+                "blocked, timed-out, and errored boards are eligible for fallback."
             ),
         }
         return jobs

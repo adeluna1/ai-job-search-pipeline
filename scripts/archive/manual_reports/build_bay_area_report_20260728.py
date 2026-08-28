@@ -183,7 +183,7 @@ def _pearl_record() -> dict:
         (ROOT / "config" / "profile.json").read_text(encoding="utf-8")
     )
     resume_text = extract_docx_text(
-        ROOT.parent / "Albert Deluna ResumeV1 - Corrected.docx"
+        ROOT.parent / "resume.docx"
     )
     record = {**job.to_dict(), **score_job(job, profile, resume_text).to_dict()}
     record["id"] = job.id
@@ -194,7 +194,7 @@ def _pearl_record() -> dict:
     )
     record["recommendation"] = f"Last 24h • {verification}."
     record["notes"] = (
-        "Resume-weighted against Albert Deluna's corrected resume. "
+        "Resume-weighted against the candidate's corrected resume. "
         f"{verification}."
     )
     return record
@@ -221,7 +221,7 @@ def build() -> tuple[Path, Path]:
             verification = selection["verification"]
             record["recommendation"] = f"{selection['window']} • {verification}."
             record["notes"] = (
-                "Resume-weighted against Albert Deluna's corrected resume. "
+                "Resume-weighted against the candidate's corrected resume. "
                 f"{verification}."
             )
             record["status"] = "new"
@@ -246,7 +246,7 @@ def build() -> tuple[Path, Path]:
         title="Bay Area recruiting & people operations matches",
         subtitle=(
             "New onsite, hybrid, and remote roles from the last 24 hours or 3 days, "
-            "weighted against Albert Deluna's corrected resume. Previously sent and "
+            "weighted against the candidate's corrected resume. Previously sent and "
             "applied roles are excluded; exact-timestamp limitations are labeled."
         ),
     )

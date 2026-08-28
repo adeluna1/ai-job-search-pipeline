@@ -192,7 +192,7 @@ def build() -> tuple[Path, Path]:
         record["status"] = "new"
         record["recommendation"] = f"{item['window']} - {item['verification']}"
         record["notes"] = (
-            "Resume-weighted against Albert Deluna's corrected resume. "
+            "Resume-weighted against the candidate's corrected resume. "
             "A live browser check reached the enabled application form and displayed "
             "candidate inputs plus Submit Application."
         )
@@ -215,7 +215,7 @@ def build() -> tuple[Path, Path]:
             "Fail-closed report: a role appears only after its live employer application "
             "opens an enabled form. Hinge Health, Handshake, Luma AI, IXL Learning, and the "
             "confidential LinkedIn listing were removed after live verification failed. "
-            "The remaining role is weighted against Albert Deluna's corrected resume."
+            "The remaining role is weighted against the candidate's corrected resume."
         ),
     )
 

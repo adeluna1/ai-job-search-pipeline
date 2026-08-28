@@ -1,10 +1,11 @@
 {
-  "name": "ai-job-search-pipeline-control-plane",
+  "name": "expedient-employment-control-plane",
   "private": true,
-  "version": "1.4.0",
-  "description": "Pinned Paperclip control plane for JobSpy/WebClaw/AWB discovery, optional ATS verification, and approval-gated browser agents.",
+  "version": "2.0.0",
+  "license": "MIT",
+  "description": "Pinned optional control plane for Expedient Employment agents and approval-gated browser workflows.",
   "devDependencies": {
-    "@openai/codex": "0.144.6",
-    "paperclipai": "2026.707.0"
+    "@openai/codex": "0.150.1",
+    "paperclipai": "2026.824.1"
   }
 }

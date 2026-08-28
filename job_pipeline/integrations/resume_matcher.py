@@ -54,8 +54,13 @@ class ResumeMatcherClient:
     ):
         cleaned = base_url.rstrip("/")
         parts = urlsplit(cleaned)
-        if parts.scheme not in {"http", "https"} or not parts.netloc:
-            raise ResumeMatcherError("Resume-Matcher URL must use HTTP(S) and include a host.")
+        if (
+            parts.scheme != "http"
+            or parts.hostname not in {"127.0.0.1", "localhost", "::1"}
+            or parts.username is not None
+            or parts.password is not None
+        ):
+            raise ResumeMatcherError("Resume-Matcher must use a loopback HTTP endpoint.")
         self.base_url = cleaned if cleaned.endswith("/api/v1") else cleaned + "/api/v1"
         self.timeout = timeout
         self._transport = transport or self._default_transport
@@ -69,7 +74,7 @@ class ResumeMatcherClient:
     ) -> dict[str, Any]:
         request = Request(self.base_url + path, data=body, method=method, headers=headers)
         try:
-            with urlopen(request, timeout=self.timeout) as response:  # noqa: S310 - explicit service URL
+            with urlopen(request, timeout=self.timeout) as response:  # nosec B310
                 payload = response.read().decode("utf-8")
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")[:800]

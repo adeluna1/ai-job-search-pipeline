@@ -43,11 +43,11 @@ function Ensure-Agent {
     $agents = Invoke-PaperclipApi -Method 'GET' -Path "/companies/$CompanyId/agents"
     $agent = Find-ByName $agents $Name
     $bundleRoot = Join-Path $script:ProjectRoot "paperclip\agents\$BundleFolder"
-    $resumePath = Join-Path $env:USERPROFILE 'Downloads\Albert Deluna ResumeV1.docx'
+    $resumePath = if ($env:JOB_PIPELINE_RESUME) { $env:JOB_PIPELINE_RESUME } else { Join-Path $env:USERPROFILE 'Downloads\resume.docx' }
     $applicationProfile = Join-Path $script:ProjectRoot 'data\application_profile.json'
     $pythonPath = Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
-    $codexExe = Get-ChildItem -LiteralPath (Join-Path $script:ProjectRoot 'node_modules\.pnpm') -Recurse -Filter 'codex.exe' |
-        Where-Object { $_.FullName -like '*@openai+codex*\vendor\x86_64-pc-windows-msvc\bin\codex.exe' } |
+    $codexExe = Get-ChildItem -LiteralPath (Join-Path $script:ProjectRoot 'node_modules') -Recurse -Filter 'codex.exe' |
+        Where-Object { $_.FullName -like '*@openai*\vendor\x86_64-pc-windows-msvc\bin\codex.exe' } |
         Select-Object -First 1
     if (-not $codexExe) {
         throw 'The project-local Codex executable was not found. Run pnpm install before configuring Paperclip.'
@@ -58,14 +58,7 @@ function Ensure-Agent {
         cwd = $script:ProjectRoot
         timeoutSec = 900
         dangerouslyBypassApprovalsAndSandbox = $false
-        # Keep Codex workspace boundaries while avoiding the administrator-only
-        # elevated Windows sandbox bootstrap in unattended Paperclip runs.
-        extraArgs = @(
-            '--sandbox', 'workspace-write',
-            '--add-dir', $script:ProjectRoot,
-            '-c', 'windows.sandbox="unelevated"',
-            '-c', 'sandbox_workspace_write.network_access=true'
-        )
+        extraArgs = @('--sandbox', 'workspace-write')
         env = @{
             JOB_PIPELINE_PROJECT_ROOT = $script:ProjectRoot
             JOB_PIPELINE_RESUME = $resumePath
@@ -152,7 +145,7 @@ $agentA = Ensure-Agent `
     -Role 'ceo' `
     -Title 'Recruiting Lead and Job Scout' `
     -Icon 'search' `
-    -Capabilities 'Discover Recruiting Coordinator roles through JobSpy/WebClaw, hard-enforce exact geography, freshness, active state, and applied exclusions, then hand at most 10 resume-ranked current-run leads to Agent B.' `
+    -Capabilities 'Discover fresh Recruiting Coordinator roles through replaceable JobSpy/WebClaw providers, record board coverage, score resume alignment, and hand qualified leads to Agent B.' `
     -BundleFolder 'agent-a' `
     -ReportsTo $null
 
@@ -162,7 +155,7 @@ $agentB = Ensure-Agent `
     -Role 'researcher' `
     -Title 'Match Analyst and Posting Verifier' `
     -Icon 'shield' `
-    -Capabilities 'Independently recheck at most 10 leads for exact geography, known-date freshness, applied history, active employer source, resume evidence, and gaps; optionally add authorized Resume-Matcher evidence.' `
+    -Capabilities 'Independently verify posting freshness, employer source, requirements, evidence, gaps, and application recommendation; optionally add explicitly authorized Resume-Matcher ATS evidence.' `
     -BundleFolder 'agent-b' `
     -ReportsTo $agentA.id
 
@@ -172,7 +165,7 @@ $agentC = Ensure-Agent `
     -Role 'general' `
     -Title 'Approval-Gated Application Assistant' `
     -Icon 'target' `
-    -Capabilities 'Recheck applied history, prepare truthful packets, and use exact-domain browser-use only after packet-hash-bound confirmation; never invent answers or submit without exact approval.' `
+    -Capabilities 'Prepare truthful application packets and use exact-domain browser-use only after a packet-hash-bound Paperclip confirmation; never invent candidate answers.' `
     -BundleFolder 'agent-c' `
     -ReportsTo $agentA.id
 
@@ -206,19 +199,19 @@ $issues = Invoke-PaperclipApi -Method 'GET' -Path "/companies/$($company.id)/iss
 $starterIssues = @(
     @{
         title = 'A: Discover fresh Recruiting Coordinator roles'
-        description = 'Use one bounded multi-board call and the corrected resume. Apply exact requested locations, a 7-day known-date gate, active-page verification, and applied/sent exclusions. Return the current run top 10 or fewer with coverage evidence; never pad the list.'
+        description = 'Use one bounded JobSpy multi-board call and the corrected resume. Search roles posted within 7 days, record per-board coverage, use WebClaw fallback if needed, and place qualified job IDs plus evidence in the issue.'
         assignee = $agentA.id
         priority = 'high'
     },
     @{
         title = 'B: Independently verify the shortlist'
-        description = 'Start only after Agent A posts no more than 10 qualified IDs and exact scope. Recheck employer URLs, geography, known-date freshness, applied history, fit evidence, and gaps. Resume-Matcher is optional and requires explicit authorization.'
+        description = 'Start only after Agent A posts qualified job IDs. Verify employer-controlled URLs, freshness, fit evidence, gaps, and apply/review/skip recommendations. Resume-Matcher is optional and requires explicit URL/upload authorization.'
         assignee = $agentB.id
         priority = 'high'
     },
     @{
         title = 'C: Prepare approval-gated application packets'
-        description = 'Start only for Agent B apply recommendations. Recheck applied history, prepare truthful packets, create a browser dry-run and hash-bound pending receipt, and never execute or submit without exact acceptance.'
+        description = 'Start only for Agent B apply recommendations. Prepare truthful packets, create a browser dry-run and hash-bound pending receipt, request Paperclip confirmation, and do not execute or submit without exact acceptance.'
         assignee = $agentC.id
         priority = 'medium'
     }

@@ -189,7 +189,7 @@ def build() -> tuple[Path, Path]:
             f"{selected['window']} | {selected['scope']} {selected['verification']}"
         )
         record["notes"] = (
-            "Weighted against Albert Deluna's corrected resume. Excluded if previously applied, "
+            "Weighted against the candidate's corrected resume. Excluded if previously applied, "
             "previously sent, closed, stale, or lacking a live employer application control."
         )
         records.append(record)
@@ -204,7 +204,7 @@ def build() -> tuple[Path, Path]:
         subtitle=(
             "Posted within the last 24 hours or three days, not present in the applied/closed "
             "registries, and rechecked on the employer site on Aug. 5, 2026. Ranked against "
-            "Albert Deluna's corrected resume. The lower-ranked cards are adjacent HR or "
+            "the candidate's corrected resume. The lower-ranked cards are adjacent HR or "
             "full-cycle recruiting options, clearly labeled in each recommendation."
         ),
     )

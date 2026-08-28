@@ -8,7 +8,7 @@ $ProjectRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Pa
 $SourceRoot = Join-Path $ProjectRoot 'tools\upstream\agent-web-browser'
 $PatchPath = Join-Path $ProjectRoot 'patches\agent-web-browser\0001-allow-documented-job-board-navigation.patch'
 $Repository = 'https://github.com/BarnsL/agent-web-browser.git'
-$PinnedCommit = 'd08856d9fda3a7273d8f732e9c6be6fb16f9f12d'
+$PinnedCommit = 'bcb8fb238602513f8897070c4a68057b03889eda'
 
 if (-not (Test-Path -LiteralPath $SourceRoot)) {
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $SourceRoot) | Out-Null
@@ -26,7 +26,7 @@ if ($currentCommit -ne $PinnedCommit) {
 
 $previousPreference = $ErrorActionPreference
 $ErrorActionPreference = 'SilentlyContinue'
-& git -c "safe.directory=$safeSource" -C $SourceRoot apply --unidiff-zero --reverse --check $PatchPath 2>$null
+& git -c "safe.directory=$safeSource" -C $SourceRoot apply --reverse --check $PatchPath 2>$null
 $patchAlreadyApplied = $LASTEXITCODE -eq 0
 $ErrorActionPreference = $previousPreference
 
@@ -34,18 +34,18 @@ if ($patchAlreadyApplied) {
     Write-Host 'Reviewed job-board navigation patch is already applied.'
 }
 else {
-    & git -c "safe.directory=$safeSource" -C $SourceRoot apply --unidiff-zero --check $PatchPath
+    & git -c "safe.directory=$safeSource" -C $SourceRoot apply --check $PatchPath
     if ($LASTEXITCODE -ne 0) {
         throw 'Agent Web Browser patch state is unknown; inspect the source before building.'
     }
-    & git -c "safe.directory=$safeSource" -C $SourceRoot apply --unidiff-zero $PatchPath
+    & git -c "safe.directory=$safeSource" -C $SourceRoot apply $PatchPath
     if ($LASTEXITCODE -ne 0) {
         throw 'Could not apply the narrow Glassdoor/ZipRecruiter navigation patch.'
     }
 }
 
 Write-Host "Agent Web Browser source ready at reviewed commit $PinnedCommit"
-Write-Host 'Safe pipeline mode: first-party Glassdoor/ZipRecruiter navigation, visible text, and bounded job-link reads only.'
+Write-Host 'Safe pipeline mode: first-party Glassdoor/ZipRecruiter navigation and visible-text reads only.'
 
 if ($RunTests -or $Build) {
     $cargoCommand = Get-Command cargo -ErrorAction SilentlyContinue

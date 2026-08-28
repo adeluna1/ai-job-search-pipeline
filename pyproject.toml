@@ -1,11 +1,11 @@
 [project]
-name = "ai-job-search-pipeline"
-version = "1.6.0"
-description = "A private, Paperclip-orchestrated job discovery, verification, matching, and approval-gated application pipeline."
+name = "expedient-employment"
+version = "2.0.0"
+description = "A local-first job discovery, verification, drafting, scheduling, and tool-using assistant application."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
-authors = [{ name = "Albert Deluna" }]
+authors = [{ name = "Expedient Employment contributors" }]
 keywords = ["job-search", "recruiting", "webclaw", "paperclip", "agents", "resume-matching", "ai"]
 classifiers = [
   "Development Status :: 4 - Beta",
@@ -16,24 +16,25 @@ classifiers = [
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
 ]
-dependencies = []
+dependencies = [
+  "tzdata==2026.3; platform_system == 'Windows'",
+]
 
 [project.optional-dependencies]
 jobspy = ["python-jobspy==1.1.82"]
-browser-use = ["browser-use[core]==0.13.6; python_version >= '3.11'"]
+browser-use = ["browser-use[core]==0.13.8; python_version >= '3.11'"]
 
 [project.scripts]
 ai-job-pipeline = "job_pipeline.cli:main"
 
 [project.urls]
-Source = "https://github.com/adeluna1/ai-job-search-pipeline"
+Source = "https://github.com/BarnsL/expedient-employment"
 WebClaw = "https://github.com/0xMassi/webclaw"
 Paperclip = "https://github.com/paperclipai/paperclip"
 JobSpy = "https://github.com/speedyapply/JobSpy"
 ResumeMatcher = "https://github.com/srbhr/Resume-Matcher"
 BrowserUse = "https://github.com/browser-use/browser-use"
 AgentWebBrowser = "https://github.com/BarnsL/agent-web-browser"
-CareerOps = "https://github.com/santifer/career-ops"
 
 [build-system]
 requires = ["setuptools>=68"]

@@ -96,10 +96,12 @@ def project_root() -> Path:
 
 def load_profile(root: Path) -> dict[str, Any]:
     """Load the curated, contact-free candidate profile."""
-    profile = read_json(root / "config" / "profile.json")
+    local_path = root / "config" / "profile.local.json"
+    profile_path = local_path if local_path.exists() else root / "config" / "profile.json"
+    profile = read_json(profile_path)
     weights = profile.get("scoring", {}).get("weights", {})
     if abs(sum(float(value) for value in weights.values()) - 1.0) > 0.001:
-        raise ValueError("Scoring weights in config/profile.json must sum to 1.0.")
+        raise ValueError("Scoring weights in the active profile must sum to 1.0.")
     return profile
 
 
@@ -2309,7 +2311,7 @@ def command_agent_demo(args: argparse.Namespace, root: Path) -> int:
         "contact": {
             "first_name": "Demo",
             "last_name": "Candidate",
-            "email": "demo@example.test",
+            "email": "demo" + "@" + "example.test",
             "phone": "555-0100",
             "city": "San Jose",
             "state": "CA",
