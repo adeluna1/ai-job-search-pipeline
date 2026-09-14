@@ -2218,7 +2218,7 @@ class PipelineTests(unittest.TestCase):
         self.assertIn('value="recruiting_leads" selected', html_text)
         self.assertIn("Rejected source noise remains available", html_text)
         self.assertIn("filter();", html_text)
-        self.assertIn("Historical comparison", html_text)
+        self.assertNotIn("Historical comparison", html_text)
         self.assertIn("Verified direct application link", html_text)
         self.assertIn("Original board link", html_text)
         self.assertIn("Unverified link requiring manual review", csv_text)

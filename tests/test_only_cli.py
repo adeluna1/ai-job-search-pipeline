@@ -80,7 +80,7 @@ class OnlyCliAdapterTests(unittest.TestCase):
         process_args, options = runner.calls[0]
         self.assertEqual(process_args[:2], [str(adapter.node_binary), str(self.entry)])
         self.assertFalse(options["shell"])
-        self.assertEqual(options["env"]["OC_HOME"], str(self.session_dir))
+        self.assertEqual(Path(options["env"]["OC_HOME"]).resolve(), self.session_dir.resolve())
 
     def test_planned_and_arbitrary_commands_are_rejected(self) -> None:
         adapter = self.adapter()
