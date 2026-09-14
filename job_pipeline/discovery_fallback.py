@@ -84,6 +84,7 @@ DIRECT_ATS_SEARCH_GROUPS = {
 }
 TITLE_SEARCH_FAMILIES = {
     "recruiting_coordination": (
+        "senior recruiting coordinator", "sr recruiting coordinator",
         "recruiting coordinator", "recruitment coordinator",
         "recruiting assistant", "recruiting scheduler",
     ),

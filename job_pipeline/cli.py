@@ -2507,6 +2507,7 @@ def build_parser() -> argparse.ArgumentParser:
     agent_a_find.add_argument(
         "--query",
         default=('"Recruiting Coordinator" OR "Recruiting Assistant" OR '
+                 '"Senior Recruiting Coordinator" OR "Sr. Recruiting Coordinator" OR '
                  '"Recruiting Scheduler" OR "Recruiting Operations Coordinator" OR '
                  '"Talent Acquisition Coordinator" OR "Talent Operations Coordinator" OR '
                  '"Talent Coordinator" OR "Candidate Experience Coordinator" OR '

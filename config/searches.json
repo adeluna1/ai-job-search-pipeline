@@ -6,6 +6,7 @@
   ],
   "results_per_query": 8,
   "queries": [
+    "(\"Senior Recruiting Coordinator\" OR \"Sr. Recruiting Coordinator\") (\"Bay Area\" OR \"Northern California\" OR \"Remote California\") job",
     "\"recruiting coordinator\" (\"San Jose\" OR \"Bay Area\" OR remote) job",
     "\"recruiting assistant\" (California OR remote) job",
     "\"recruiting scheduler\" (California OR remote) job",

@@ -33,6 +33,14 @@ Any AI modifying this repository must preserve these rules:
 
 ## Search flow
 
+### Required sources and no-credit fallback
+
+Include explicit LinkedIn and Indeed searches in every search, alongside employer career pages and trusted ATS sources. If Tavily is unavailable or its allowance is exhausted, an assistant with built-in web search should use that search capability and direct employer/ATS reads. This is an assistant workflow, not an automatic provider switch in the Python CLI. Report any unavailable source coverage honestly.
+
+Read `config/search_preferences.local.md` when present for private user preferences; never publish that file. Preserve the requested geography, freshness, application-history suppression, and employer verification gates. Cached relative dates on job boards do not establish current freshness. Deliver an interactive report, and keep unverified leads separate from verified matches.
+
+The maintained default query includes Senior Recruiting Coordinator and Sr. Recruiting Coordinator. The role gate admits these titles when explicitly requested while retaining exclusions for unrelated senior recruiting roles.
+
 ```text
 User's exact role + location + time window
                  |

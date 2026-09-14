@@ -124,7 +124,13 @@ def evaluate_role_scope(job: Job, query: str) -> RoleScopeDecision:
             ),
             "",
         )
-        if senior_match:
+        senior_coordinator_requested = any(
+            phrase in requested for phrase in ('senior recruiting coordinator', 'sr recruiting coordinator')
+        )
+        senior_coordinator = bool(re.fullmatch(
+            r'(?:senior|sr) recruiting coordinator(?: (?:contract|temporary|remote))?', title
+        ))
+        if senior_match and not (senior_coordinator_requested and senior_coordinator):
             return RoleScopeDecision(
                 False,
                 f"Title '{job.title}' is senior-level ({senior_match}).",

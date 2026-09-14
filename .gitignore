@@ -10,6 +10,7 @@ logs/
 tools/
 *.tmp
 config/*.local.json
+config/*.local.md
 .idea/
 .vscode/
 dist/
