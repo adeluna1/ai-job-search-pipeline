@@ -15,7 +15,7 @@ import queue
 import threading
 import time
 from dataclasses import dataclass, field
-from enum import StrEnum
+from enum import Enum
 from typing import Any, Callable, Mapping
 
 from .util import redact_secrets
@@ -53,13 +53,17 @@ class ToolExecutionError(ToolBrokerError):
     """Raised when a registered handler fails."""
 
 
-class ToolPolicy(StrEnum):
+class ToolPolicy(str, Enum):
     """Authority classes used by assistants, schedules, and approval surfaces."""
 
     READ = "read"
     LOCAL_WRITE = "local_write"
     EXTERNAL_DRAFT = "external_draft"
     EXTERNAL_ACTION = "external_action"
+
+    def __str__(self) -> str:
+        """Keep string-value behavior on all supported Python versions."""
+        return self.value
 
 
 @dataclass(frozen=True)
